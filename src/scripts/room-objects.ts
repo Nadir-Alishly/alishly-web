@@ -167,6 +167,8 @@ function buildPrimitive(type: PrimitiveType): Group {
 			mesh = new Mesh(new CylinderGeometry(part.radiusTop, part.radiusBottom, part.height, 16), material);
 			mesh.position.set(x, y + part.height / 2, z);
 		}
+		mesh.castShadow = true;
+		mesh.receiveShadow = true;
 		mesh.userData.role = part.role;
 		if (part.role !== 'main' && part.role !== 'accent') material.color.set(part.role);
 		group.add(mesh);
@@ -223,6 +225,8 @@ function instantiateModel(template: Object3D, defaultScale: number): Group {
 	clone.traverse((node) => {
 		const mesh = node as Partial<Mesh>;
 		if (!mesh.material) return;
+		node.castShadow = true;
+		node.receiveShadow = true;
 		const own = (m: Material) => {
 			const copy = m.clone();
 			const color = (copy as Partial<MeshLambertMaterial>).color;
@@ -253,6 +257,8 @@ function buildMissingModel(): Group {
 	const group = new Group();
 	const material = new MeshLambertMaterial({ color: '#c0392b', wireframe: true });
 	const mesh = new Mesh(new BoxGeometry(0.6, 0.6, 0.6), material);
+	mesh.castShadow = true;
+	mesh.receiveShadow = true;
 	mesh.position.y = 0.3;
 	group.add(mesh);
 	return group;
