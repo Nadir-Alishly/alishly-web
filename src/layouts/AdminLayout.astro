@@ -1,0 +1,46 @@
+---
+import { Font } from 'astro:assets';
+import '../styles/global.css';
+
+interface Props {
+	title: string;
+}
+
+const { title } = Astro.props;
+
+// The admin page holds a GitHub token, so it gets a strict policy of its own. A <meta> CSP cannot
+// carry frame-ancestors (public/_headers does that), but everything else can be tested locally.
+//  - script-src 'self': every script on this page must be an external file (checked in dist-check).
+//  - style-src needs 'unsafe-inline' for styles only: the Astro Fonts <Font> component writes its
+//    @font-face rules into an inline <style>. Inline scripts stay blocked.
+//  - connect-src: GitHub's API, plus blob: because GLTFLoader reads embedded textures through blob URLs.
+const csp = [
+	"default-src 'self'",
+	"script-src 'self'",
+	"style-src 'self' 'unsafe-inline'",
+	"img-src 'self' data: blob:",
+	"font-src 'self'",
+	"connect-src 'self' blob: https://api.github.com",
+	"object-src 'none'",
+	"base-uri 'none'",
+	"form-action 'none'",
+].join('; ');
+---
+
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta http-equiv="Content-Security-Policy" content={csp} />
+		<meta name="robots" content="noindex, nofollow, noarchive" />
+		<meta name="referrer" content="no-referrer" />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<link rel="icon" href="/favicon.ico" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>{title}</title>
+		<Font cssVariable="--font-montserrat" preload />
+		<Font cssVariable="--font-libre-baskerville" preload />
+	</head>
+	<body class="min-h-dvh bg-stone-50 text-stone-800 antialiased">
+		<slot />
+	</body>
+</html>

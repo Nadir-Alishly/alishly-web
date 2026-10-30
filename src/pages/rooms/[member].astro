@@ -3,6 +3,7 @@ import Layout from '../../layouts/Layout.astro';
 import RoomSwitcher from '../../components/RoomSwitcher.astro';
 import RoomScene from '../../components/RoomScene.astro';
 import { family, type FamilyMember } from '../../data/family';
+import { bundledScene } from '../../data/load-scene';
 
 export function getStaticPaths() {
 	return family.map((member) => ({
@@ -16,13 +17,14 @@ interface Props {
 }
 
 const { member } = Astro.props;
+const objects = bundledScene.rooms[member.slug]?.objects ?? [];
 ---
 
 <Layout title={`${member.name}'s room · Alishly`}>
 	<div class="flex h-dvh flex-col">
 		<RoomSwitcher current={member.slug} />
 		<main class="relative min-h-0 flex-1">
-			<RoomScene member={member} />
+			<RoomScene member={member} objects={objects} />
 			<h1
 				class="font-heading pointer-events-none absolute top-2 left-4 text-2xl font-semibold sm:text-3xl"
 			>

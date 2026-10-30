@@ -1,12 +1,15 @@
 ---
 import type { FamilyMember } from '../data/family';
+import type { SceneObject } from '../data/scene';
 
 interface Props {
 	member: FamilyMember;
+	/** The room's furniture from scene.json, already validated. */
+	objects?: SceneObject[];
 }
 
-const { member } = Astro.props;
-const config = JSON.stringify({ name: member.name, colors: member.colors });
+const { member, objects = [] } = Astro.props;
+const config = JSON.stringify({ name: member.name, colors: member.colors, objects });
 ---
 
 {/*

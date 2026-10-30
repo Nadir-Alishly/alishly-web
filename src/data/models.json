@@ -1,0 +1,8 @@
+[
+	{
+		"id": "test-crate",
+		"label": "Test crate",
+		"file": "/models/test-crate.glb",
+		"defaultScale": 1
+	}
+]
