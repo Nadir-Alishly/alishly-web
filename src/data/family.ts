@@ -1,8 +1,11 @@
+// Wall colours are the room colours from room-colors-v2.pdf (both walls). `floor` is the oak floor's faint tint: its hue nudged
+// towards the room's, derived by floorOf() in room-palette.ts, which the tests use to check these literals. This file keeps
+// no imports so plain Node can load it.
 export interface RoomColors {
 	leftWall: string;
 	rightWall: string;
+	/** Faint tint of the oak floor (see floorMultiplier), not a flat floor colour. */
 	floor: string;
-	trim: string;
 }
 
 export interface FamilyMember {
@@ -16,36 +19,36 @@ export const family: readonly FamilyMember[] = [
 	{
 		slug: 'elnur',
 		name: 'Elnur',
-		colors: { leftWall: '#b7d4f0', rightWall: '#a3c6ea', floor: '#e7dcc3', trim: '#f6f9fd' },
+		colors: { leftWall: '#dff2fe', rightWall: '#dff2fe', floor: '#9b7650' },
 	},
 	{
 		slug: 'sabina',
 		name: 'Sabina',
-		colors: { leftWall: '#f5c8d6', rightWall: '#efb3c7', floor: '#f1dcd0', trim: '#fff7f9' },
+		colors: { leftWall: '#ede9fe', rightWall: '#ede9fe', floor: '#a37154' },
 	},
 	{
 		slug: 'nadir',
 		name: 'Nadir',
-		colors: { leftWall: '#bde6cf', rightWall: '#a9dcc0', floor: '#e4e8cc', trim: '#f6fcf8' },
+		colors: { leftWall: '#ecfcca', rightWall: '#ecfcca', floor: '#a07653' },
 	},
 	{
 		slug: 'chinara',
 		name: 'Chinara',
-		colors: { leftWall: '#d6c9f0', rightWall: '#c6b6ea', floor: '#e9e2ee', trim: '#faf8ff' },
+		colors: { leftWall: '#ffe4e6', rightWall: '#ffe4e6', floor: '#a37554' },
 	},
 	{
 		slug: 'alibala',
 		name: 'Alibala',
-		colors: { leftWall: '#f8d2b3', rightWall: '#f3bf98', floor: '#e8dccd', trim: '#fffaf4' },
+		colors: { leftWall: '#ffedd4', rightWall: '#ffedd4', floor: '#a37654' },
 	},
 	{
 		slug: 'elkhan',
 		name: 'Elkhan',
-		colors: { leftWall: '#f5e6a6', rightWall: '#eed98e', floor: '#e3dfcd', trim: '#fffdf1' },
+		colors: { leftWall: '#fef9c2', rightWall: '#fef9c2', floor: '#a27653' },
 	},
 	{
 		slug: 'fazil',
 		name: 'Fazil',
-		colors: { leftWall: '#b4e2df', rightWall: '#9fd6d3', floor: '#ecdfd0', trim: '#f5fcfb' },
+		colors: { leftWall: '#cbfbf1', rightWall: '#cbfbf1', floor: '#9d7650' },
 	},
 ];

@@ -92,8 +92,8 @@ export interface WindowFrame {
 	frame: Box[];
 	/** Bars between panes: full-height vertical ones, horizontal ones cut into segments between them. */
 	muntins: Box[];
-	/** The glazed area inside the frame, plus the x positions of the panes (glass, sky) within the wall. */
-	glazing: { z0: number; z1: number; y0: number; y1: number; glassX: number; skyX: number };
+	/** The glazed area inside the frame, plus the x position of the glowing pane within the wall's thickness. */
+	glazing: { z0: number; z1: number; y0: number; y1: number; paneX: number };
 }
 
 /**
@@ -146,6 +146,6 @@ export function windowFrame(
 		sill,
 		frame,
 		muntins,
-		glazing: { z0: gz0, z1: gz1, y0: gy0, y1: gy1, glassX: (fx0 + fx1) / 2, skyX: -half + inset / 2 },
+		glazing: { z0: gz0, z1: gz1, y0: gy0, y1: gy1, paneX: -half + inset / 2 },
 	};
 }

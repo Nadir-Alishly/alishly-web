@@ -1,0 +1,12 @@
+---
+import { TEXTURE_PRELOADS } from '../data/room-textures';
+---
+
+{
+	/* crossorigin="anonymous" is TextureLoader's mode (three's Loader default); another mode would fetch the file twice. */
+}
+{
+	TEXTURE_PRELOADS.map(({ href, media }) => (
+		<link rel="preload" as="image" href={href} media={media} crossorigin="anonymous" />
+	))
+}

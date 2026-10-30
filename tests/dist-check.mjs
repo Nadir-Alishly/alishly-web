@@ -1,5 +1,5 @@
 // Read-only check of the built site in dist/. Run after `npm run build`: node tests/dist-check.mjs
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const dist = new URL('../dist/', import.meta.url).pathname;
@@ -7,6 +7,11 @@ const members = [
   ['elnur', 'Elnur'], ['sabina', 'Sabina'], ['nadir', 'Nadir'], ['chinara', 'Chinara'],
   ['alibala', 'Alibala'], ['elkhan', 'Elkhan'], ['fazil', 'Fazil'],
 ];
+// Wall colours from room-colors-v2.pdf (lower-case), both walls of each room.
+const pdfWalls = {
+  elnur: '#dff2fe', sabina: '#ede9fe', nadir: '#ecfcca', chinara: '#ffe4e6',
+  alibala: '#ffedd4', elkhan: '#fef9c2', fazil: '#cbfbf1',
+};
 let failed = 0;
 const check = (ok, msg) => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${msg}`); };
 const read = (p) => readFileSync(join(dist, p), 'utf8');
@@ -43,13 +48,40 @@ for (const [slug, name] of members) {
   check(/data-astro-transition-persist="room-scene"/.test(html), `${slug}: persisted wrapper present`);
   const cfg = html.match(/data-room="([^"]+)"/)?.[1].replace(/&quot;/g, '"');
   let parsed; try { parsed = JSON.parse(cfg); } catch {}
-  check(parsed?.name === name && ['leftWall', 'rightWall', 'floor', 'trim'].every((k) => /^#[0-9a-f]{6}$/i.test(parsed.colors?.[k] ?? '')), `${slug}: data-room JSON valid`);
+  check(parsed?.name === name && ['leftWall', 'rightWall', 'floor'].every((k) => /^#[0-9a-f]{6}$/i.test(parsed.colors?.[k] ?? '')) && !('trim' in (parsed.colors ?? {})), `${slug}: data-room JSON valid`);
   check(/astro-view-transitions-enabled/.test(html), `${slug}: ClientRouter enabled`);
+  // room-colors-v2.pdf: both walls carry the room's exact colour
+  const pdfHex = pdfWalls[slug];
+  check(parsed?.colors?.leftWall?.toLowerCase() === pdfHex && parsed?.colors?.rightWall?.toLowerCase() === pdfHex, `${slug}: both walls are the v2 PDF colour ${pdfHex}`);
 }
 
 // Distinct palettes
 const palettes = members.map(([s]) => (read(`rooms/${s}/index.html`).match(/data-room="([^"]+)"/)?.[1] ?? ''));
 check(new Set(palettes).size === 7, 'all 7 palettes are distinct');
+check(!palettes.some((p) => /trim/i.test(p)), 'no data-room JSON carries a "trim" colour');
+
+// Texture preloads: room pages and /admin preload the 4 texture URLs (same crossorigin mode as the TextureLoader), the picker none
+const texFiles = ['floor/oak-diff.jpg', 'floor/oak-rough.jpg', 'wall/stucco-detail.jpg', 'wall/stucco-normal.webp'];
+const imagePreloads = (html) => [...html.matchAll(/<link\b[^>]*>/g)].map((m) => m[0]).filter((t) => /\brel="preload"/.test(t) && /\bas="image"/.test(t));
+const preloadChecks = (label, html) => {
+  const tags = imagePreloads(html);
+  for (const f of texFiles) {
+    const hits = tags.filter((t) => t.includes(`href="/textures/${f}"`));
+    check(hits.length === 1 && /\bcrossorigin="anonymous"/.test(hits[0]), `${label}: exactly one <link rel="preload" as="image" crossorigin="anonymous"> for /textures/${f}`);
+  }
+  const normal = tags.find((t) => t.includes('stucco-normal.webp'));
+  check(/media="not all and \(pointer: coarse\)"/.test(normal ?? ''), `${label}: the stucco normal preload is skipped on touch screens`);
+  check(tags.length === 4, `${label}: no other image preloads (${tags.length})`);
+};
+for (const [slug] of members) preloadChecks(`${slug}`, read(`rooms/${slug}/index.html`));
+preloadChecks('admin', read('admin/index.html'));
+check(!/\/textures\//.test(read('index.html')), 'picker: no texture URL at all (no preload)');
+
+// Room textures: copied from public/ into dist/
+for (const f of ['floor/oak-diff.jpg', 'floor/oak-rough.jpg', 'wall/stucco-detail.jpg', 'wall/stucco-normal.webp']) {
+  const p = join(dist, 'textures', f);
+  check(existsSync(p) && statSync(p).size > 10_000, `dist/textures/${f} present`);
+}
 
 // Unknown slug: no page generated
 check(!existsSync(join(dist, 'rooms/nobody')), 'no page for unknown slug');

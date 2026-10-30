@@ -1,5 +1,6 @@
 ---
 import AdminLayout from '../../layouts/AdminLayout.astro';
+import TexturePreload from '../../components/TexturePreload.astro';
 import { family } from '../../data/family';
 import { adminScene } from '../../data/load-scene';
 
@@ -24,6 +25,7 @@ const transformFields = [
 ---
 
 <AdminLayout title="Scene admin · Alishly">
+	<TexturePreload slot="head" />
 	<div
 		id="admin-root"
 		data-bundled={JSON.stringify(adminScene)}

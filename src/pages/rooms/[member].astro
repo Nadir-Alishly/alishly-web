@@ -2,6 +2,7 @@
 import Layout from '../../layouts/Layout.astro';
 import RoomSwitcher from '../../components/RoomSwitcher.astro';
 import RoomScene from '../../components/RoomScene.astro';
+import TexturePreload from '../../components/TexturePreload.astro';
 import { family, type FamilyMember } from '../../data/family';
 import { bundledScene } from '../../data/load-scene';
 
@@ -21,6 +22,7 @@ const objects = bundledScene.rooms[member.slug]?.objects ?? [];
 ---
 
 <Layout title={`${member.name}'s room · Alishly`}>
+	<TexturePreload slot="head" />
 	<div class="flex h-dvh flex-col">
 		<RoomSwitcher current={member.slug} />
 		<main class="relative min-h-0 flex-1">

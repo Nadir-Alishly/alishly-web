@@ -48,7 +48,6 @@ export const ROOM_DIMS = {
 	inner: 3.0, // inner faces of the two back walls
 	wallHeight: 3,
 	slab: 0.4,
-	baseboard: { depth: 0.08, height: 0.22 },
 };
 
 /** The space an object may occupy: in front of the back walls, on the floor, under the wall top. */

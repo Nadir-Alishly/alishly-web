@@ -245,12 +245,19 @@ test('windowFrame: muntins lie within the glazing rectangle and divide it into c
 	assert.ok(mArea < glazingArea / 2, 'panes are mostly open glass');
 });
 
-test('windowFrame: glazing metadata is consistent (x positions inside the wall, rect inside the opening)', () => {
+test('windowFrame: glazing metadata is consistent (pane x inside the wall, rect inside the opening)', () => {
 	const g = windowFrame(D).glazing;
 	assert.ok(g.z0 > O.z0 && g.z1 < O.z1 && g.y0 > O.y0 && g.y1 < O.y1);
 	assert.ok(g.z0 < g.z1 && g.y0 < g.y1);
-	for (const x of [g.glassX, g.skyX]) assert.ok(x >= -D.half && x <= -D.inner, `x ${x} within the wall thickness`);
-	assert.ok(g.skyX < g.glassX, 'sky pane is behind (outside) the glass');
+	assert.ok(g.paneX >= -D.half && g.paneX <= -D.inner, `paneX ${g.paneX} within the wall thickness`);
+	assert.deepEqual(Object.keys(g).sort(), ['paneX', 'y0', 'y1', 'z0', 'z1'], 'glassX/skyX are gone');
+});
+
+test('windowFrame: the glow pane sits outside the frame bars (behind them as seen from the room)', () => {
+	const f = windowFrame(D);
+	const g = f.glazing;
+	// The room is at x > -inner, so the pane must not reach past any bar's room-side face.
+	for (const b of [...f.frame, ...f.muntins]) assert.ok(g.paneX <= b.max[0], 'pane is not in front of a bar');
 });
 
 test('windowFrame: frame x-extent is inset from both wall faces (no coplanar faces)', () => {
