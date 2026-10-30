@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+@theme inline {
+	--font-sans: var(--font-montserrat), system-ui, sans-serif;
+	--font-heading: var(--font-libre-baskerville), Georgia, serif;
+}
+
+@layer base {
+	h1,
+	h2,
+	h3,
+	h4,
+	h5,
+	h6 {
+		font-family: var(--font-heading);
+	}
+}

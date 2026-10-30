@@ -1,0 +1,98 @@
+---
+import type { FamilyMember } from '../data/family';
+
+interface Props {
+	member: FamilyMember;
+}
+
+const { member } = Astro.props;
+const config = JSON.stringify({ name: member.name, colors: member.colors });
+---
+
+{/*
+	The outer element is NOT persisted, so on every navigation it is the new page's copy and
+	its data-room always describes the room being shown. The inner element is persisted: the
+	live canvas (and its WebGL context) is carried over from the previous room page.
+*/}
+<div data-room={config} class="absolute inset-0">
+	<div transition:persist="room-scene" transition:animate="none" class="h-full w-full">
+		<canvas
+			role="img"
+			aria-label={`Isometric 3D view of ${member.name}'s room. Drag to rotate, scroll or pinch to zoom.`}
+			class="block h-full w-full"></canvas>
+	</div>
+</div>
+
+<script>
+	import { createRoomScene } from '../scripts/room-scene';
+	import type { RoomConfig, RoomSceneHandle } from '../scripts/room-scene';
+	import type { TransitionBeforeSwapEvent } from 'astro:transitions/client';
+
+	// Module-level singleton: at most one scene (one renderer, one canvas) at any time.
+	let scene: RoomSceneHandle | null = null;
+	let sceneCanvas: HTMLCanvasElement | null = null;
+	// A canvas whose context was force-lost cannot get a new one, so never reuse it.
+	const spent = new WeakSet<HTMLCanvasElement>();
+
+	function disposeScene() {
+		if (sceneCanvas) spent.add(sceneCanvas);
+		scene?.dispose();
+		scene = null;
+		sceneCanvas = null;
+	}
+
+	function readConfig(root: Element | null): RoomConfig | null {
+		try {
+			return root ? (JSON.parse(root.getAttribute('data-room') ?? '') as RoomConfig) : null;
+		} catch {
+			return null;
+		}
+	}
+
+	// Reconcile the scene with whatever page is on screen. Idempotent: calling it any
+	// number of times in a row never creates a second renderer.
+	function sync() {
+		const root = document.querySelector('[data-room]');
+		const config = readConfig(root);
+		let canvas = root?.querySelector('canvas') ?? null;
+		if (!root || !config || !canvas) {
+			disposeScene(); // e.g. the picker page
+			return;
+		}
+		if (scene && sceneCanvas === canvas && canvas.isConnected) {
+			scene.setRoom(config); // persisted canvas: swap the room in place
+			return;
+		}
+		disposeScene();
+		if (spent.has(canvas)) {
+			const fresh = canvas.cloneNode(false) as HTMLCanvasElement;
+			canvas.replaceWith(fresh);
+			canvas = fresh;
+		}
+		scene = createRoomScene(canvas, config);
+		sceneCanvas = canvas;
+	}
+
+	// This module runs once per document, but guard anyway (HMR can re-evaluate it) so
+	// listeners are never registered twice.
+	const flag = window as typeof window & { __roomSceneBound?: boolean };
+	if (!flag.__roomSceneBound) {
+		flag.__roomSceneBound = true;
+
+		document.addEventListener('astro:page-load', sync);
+		// Leaving for a page without a room: release the GL context before the canvas goes.
+		document.addEventListener('astro:before-swap', (event) => {
+			const next = (event as TransitionBeforeSwapEvent).newDocument;
+			if (!next.querySelector('[data-room]')) disposeScene();
+		});
+		window.addEventListener('pagehide', disposeScene);
+		// Back/forward cache restore: pagehide disposed the scene, so bring it back.
+		window.addEventListener('pageshow', (event) => {
+			if (event.persisted) sync();
+		});
+
+		// If this module is first evaluated after astro:page-load already fired
+		// (navigating from the picker to a room), mount now.
+		sync();
+	}
+</script>

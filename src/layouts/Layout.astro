@@ -1,0 +1,30 @@
+---
+import { ClientRouter } from 'astro:transitions';
+import { Font } from 'astro:assets';
+import '../styles/global.css';
+
+interface Props {
+	title: string;
+	description?: string;
+}
+
+const { title, description = 'A little isometric room for every member of the Alishly family.' } =
+	Astro.props;
+---
+
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<link rel="icon" href="/favicon.ico" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="description" content={description} />
+		<title>{title}</title>
+		<Font cssVariable="--font-montserrat" preload />
+		<Font cssVariable="--font-libre-baskerville" preload />
+		<ClientRouter />
+	</head>
+	<body class="min-h-dvh bg-stone-50 text-stone-800 antialiased">
+		<slot />
+	</body>
+</html>

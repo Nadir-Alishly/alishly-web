@@ -1,0 +1,37 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { family } from '../data/family';
+---
+
+<Layout title="The Alishly family">
+	<main class="mx-auto flex min-h-dvh max-w-4xl flex-col justify-center px-4 py-12 sm:px-6">
+		<h1 class="font-heading text-3xl font-semibold sm:text-4xl">The Alishly family</h1>
+		<p class="mt-2 text-stone-600">Everyone has a room. Pick one to step inside.</p>
+
+		<ul class="mt-8 grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4">
+			{
+				family.map((member) => (
+					<li>
+						<a
+							href={`/rooms/${member.slug}/`}
+							class="group block rounded-2xl bg-white p-3 shadow-sm ring-1 ring-stone-200 transition hover:shadow-md hover:ring-stone-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-stone-900"
+						>
+							<div
+								aria-hidden="true"
+								class="grid h-20 grid-cols-2 grid-rows-[3fr_2fr] overflow-hidden rounded-xl"
+							>
+								<span style={`background:${member.colors.leftWall}`} />
+								<span style={`background:${member.colors.rightWall}`} />
+								<span class="col-span-2" style={`background:${member.colors.floor}`} />
+							</div>
+							<span class="font-heading mt-3 block text-lg font-medium">{member.name}</span>
+							<span class="block text-sm text-stone-500 group-hover:text-stone-700">
+								Enter room →
+							</span>
+						</a>
+					</li>
+				))
+			}
+		</ul>
+	</main>
+</Layout>

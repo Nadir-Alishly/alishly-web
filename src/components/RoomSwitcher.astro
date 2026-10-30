@@ -1,0 +1,60 @@
+---
+import { family } from '../data/family';
+
+interface Props {
+	/** Slug of the room being shown; gets aria-current="page". */
+	current: string;
+}
+
+const { current } = Astro.props;
+
+const linkClass =
+	'block whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium outline-offset-2 focus-visible:outline-2 focus-visible:outline-stone-900';
+---
+
+<nav aria-label="Rooms" class="flex items-center gap-2 px-4 py-3">
+	<a
+		href="/"
+		class:list={[linkClass, 'shrink-0 text-stone-600 hover:bg-stone-200/70 hover:text-stone-900']}
+	>
+		<span aria-hidden="true">←</span> All rooms
+	</a>
+	<ul
+		data-room-switcher
+		class="flex min-w-0 flex-1 gap-1 overflow-x-auto px-1.5 py-1 [scrollbar-width:thin]"
+	>
+		{
+			family.map((member) => (
+				<li class="shrink-0">
+					<a
+						href={`/rooms/${member.slug}/`}
+						aria-current={member.slug === current ? 'page' : undefined}
+						class:list={[
+							linkClass,
+							'text-stone-700 hover:bg-stone-200/70 aria-[current=page]:bg-stone-900 aria-[current=page]:text-white',
+						]}
+					>
+						{member.name}
+					</a>
+				</li>
+			))
+		}
+	</ul>
+</nav>
+
+<script>
+	// Keep the active name visible when the list overflows (phones).
+	const revealActive = () =>
+		document
+			.querySelector('[data-room-switcher] [aria-current="page"]')
+			?.scrollIntoView({ inline: 'center', block: 'nearest' });
+
+	// Inline module scripts re-run on every navigation in production builds, so guard
+	// the listener; the direct call still runs each time (the nav was just swapped in).
+	const flag = window as typeof window & { __switcherBound?: boolean };
+	if (!flag.__switcherBound) {
+		flag.__switcherBound = true;
+		document.addEventListener('astro:page-load', revealActive);
+	}
+	revealActive();
+</script>

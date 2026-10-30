@@ -1,0 +1,33 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import RoomSwitcher from '../../components/RoomSwitcher.astro';
+import RoomScene from '../../components/RoomScene.astro';
+import { family, type FamilyMember } from '../../data/family';
+
+export function getStaticPaths() {
+	return family.map((member) => ({
+		params: { member: member.slug },
+		props: { member },
+	}));
+}
+
+interface Props {
+	member: FamilyMember;
+}
+
+const { member } = Astro.props;
+---
+
+<Layout title={`${member.name}'s room · Alishly`}>
+	<div class="flex h-dvh flex-col">
+		<RoomSwitcher current={member.slug} />
+		<main class="relative min-h-0 flex-1">
+			<RoomScene member={member} />
+			<h1
+				class="font-heading pointer-events-none absolute top-2 left-4 text-2xl font-semibold sm:text-3xl"
+			>
+				{member.name}'s room
+			</h1>
+		</main>
+	</div>
+</Layout>
