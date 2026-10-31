@@ -4,6 +4,7 @@ import RoomSwitcher from '../../components/RoomSwitcher.astro';
 import RoomScene from '../../components/RoomScene.astro';
 import TexturePreload from '../../components/TexturePreload.astro';
 import { family, type FamilyMember } from '../../data/family';
+import { effectiveColors } from '../../data/effective-colors';
 import { bundledScene } from '../../data/load-scene';
 
 export function getStaticPaths() {
@@ -19,6 +20,7 @@ interface Props {
 
 const { member } = Astro.props;
 const objects = bundledScene.rooms[member.slug]?.objects ?? [];
+const colors = effectiveColors(member, bundledScene);
 ---
 
 <Layout title={`${member.name}'s room · Alishly`}>
@@ -26,7 +28,7 @@ const objects = bundledScene.rooms[member.slug]?.objects ?? [];
 	<div class="flex h-dvh flex-col">
 		<RoomSwitcher current={member.slug} />
 		<main class="relative min-h-0 flex-1">
-			<RoomScene member={member} objects={objects} />
+			<RoomScene member={member} objects={objects} colors={colors} settings={bundledScene.settings} />
 			<h1
 				class="font-heading pointer-events-none absolute top-2 left-4 text-2xl font-semibold sm:text-3xl"
 			>

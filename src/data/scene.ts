@@ -2,6 +2,9 @@
 // Pure TypeScript with only erasable syntax and no DOM/three/Astro imports, so Node can import it
 // directly (`node --test`).
 
+import { COLOR_RE, DEFAULT_SETTINGS, cloneSettings, parseSettings, sparseSettings } from './scene-settings.ts';
+import type { SceneSettings } from './scene-settings.ts';
+
 export type Vec3 = [number, number, number];
 
 export interface SceneObject {
@@ -19,10 +22,14 @@ export interface SceneObject {
 
 export interface RoomObjects {
 	objects: SceneObject[];
+	/** `#rrggbb`: overrides the room's wall colour (both walls; the floor tint follows). Omitted = family.ts. */
+	wallColor?: string;
 }
 
 export interface SceneData {
 	version: 1;
+	/** Global look (textures, sun, glow, lights). Always complete in memory; the file stores only the differences. */
+	settings: SceneSettings;
 	rooms: Record<string, RoomObjects>;
 }
 
@@ -82,7 +89,6 @@ export interface ParseResult {
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const SLUG_RE = /^[a-z0-9-]{1,64}$/;
-const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -90,7 +96,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 export function emptyScene(slugs: readonly string[]): SceneData {
 	const rooms: Record<string, RoomObjects> = {};
 	for (const slug of slugs) rooms[slug] = { objects: [] };
-	return { version: SCENE_VERSION, rooms };
+	return { version: SCENE_VERSION, settings: cloneSettings(DEFAULT_SETTINGS), rooms };
 }
 
 export function isPrimitiveType(type: string): type is PrimitiveType {
@@ -169,7 +175,9 @@ function parseObject(raw: unknown, options: ParseOptions): SceneObject | string 
 export function parseScene(input: unknown, options: ParseOptions = {}): ParseResult {
 	const warnings: string[] = [];
 	const slugs = options.slugs;
-	const scene: SceneData = slugs ? emptyScene(slugs) : { version: SCENE_VERSION, rooms: {} };
+	const scene: SceneData = slugs
+		? emptyScene(slugs)
+		: { version: SCENE_VERSION, settings: cloneSettings(DEFAULT_SETTINGS), rooms: {} };
 	const fail = (message: string): ParseResult => {
 		warnings.push(message);
 		return { scene, warnings, ok: false };
@@ -180,6 +188,10 @@ export function parseScene(input: unknown, options: ParseOptions = {}): ParseRes
 		return fail(`unsupported scene version ${JSON.stringify(input.version)} (expected ${SCENE_VERSION})`);
 	}
 	if (!isRecord(input.rooms)) return fail('"rooms" must be an object');
+
+	const parsedSettings = parseSettings(input.settings);
+	scene.settings = parsedSettings.settings;
+	warnings.push(...parsedSettings.warnings);
 
 	for (const slug of Object.keys(input.rooms)) {
 		const known = slugs ? slugs.includes(slug) : SLUG_RE.test(slug);
@@ -219,7 +231,15 @@ export function parseScene(input: unknown, options: ParseOptions = {}): ParseRes
 		if (overflow) {
 			warnings.push(`room "${slug}": more than ${LIMITS.maxObjectsPerRoom} objects, ${overflow} dropped`);
 		}
-		scene.rooms[slug] = { objects };
+		const entry: RoomObjects = { objects };
+		if (room.wallColor !== undefined) {
+			if (typeof room.wallColor === 'string' && COLOR_RE.test(room.wallColor)) {
+				entry.wallColor = room.wallColor.toLowerCase();
+			} else {
+				warnings.push(`room "${slug}": wallColor must be "#rrggbb", ignored`);
+			}
+		}
+		scene.rooms[slug] = entry;
 	}
 	return { scene, warnings, ok: true };
 }
@@ -231,7 +251,15 @@ export function validateScene(input: unknown, options: ParseOptions = {}): strin
 
 /** The exact text committed to GitHub: stable key order, 2-space indent, trailing newline. */
 export function serializeScene(scene: SceneData): string {
-	return JSON.stringify(scene, null, 2) + '\n';
+	// Canonical shape: `settings` only when something differs from the defaults (sparse, see scene-settings.ts),
+	// `wallColor` only when set, objects first.
+	const rooms: Record<string, RoomObjects> = {};
+	for (const [slug, room] of Object.entries(scene.rooms)) {
+		rooms[slug] = room.wallColor ? { objects: room.objects, wallColor: room.wallColor } : { objects: room.objects };
+	}
+	const settings = scene.settings ? sparseSettings(scene.settings) : undefined;
+	const out = settings ? { version: scene.version, settings, rooms } : { version: scene.version, rooms };
+	return JSON.stringify(out, null, 2) + '\n';
 }
 
 export function cloneScene(scene: SceneData): SceneData {

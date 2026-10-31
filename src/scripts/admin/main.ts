@@ -17,6 +17,8 @@ import {
 	validateTarget,
 } from './github';
 import type { GithubTarget, StorageLike } from './github';
+import { mountSettingsPanel } from './settings-panel';
+import type { SettingsPanel } from './settings-panel';
 
 const DEFAULT_MESSAGE = 'Update room scenes via admin';
 const CONFIRM_MS = 5000;
@@ -54,6 +56,9 @@ export function mountAdmin(root: HTMLElement) {
 	// --- Elements -----------------------------------------------------------------------------
 	const canvas = byId<HTMLCanvasElement>('admin-canvas');
 	const roomSelect = byId<HTMLSelectElement>('room-select');
+	const wallInput = byId<HTMLInputElement>('room-wall-color');
+	const wallReset = byId<HTMLButtonElement>('room-wall-reset');
+	const settingsBox = byId('settings-panel');
 	const indicator = byId('unsaved-indicator');
 	const indicatorText = byId('unsaved-text');
 	const catalogBox = byId('catalog');
@@ -167,6 +172,17 @@ export function mountAdmin(root: HTMLElement) {
 		}
 	};
 
+	/** The selected room's wall colour: its override, or the family.ts colour it falls back to. */
+	const refreshWallColor = () => {
+		if (!editor) return;
+		const override = editor.getWallColor();
+		const family = rooms.find((r) => r.slug === editor?.room);
+		wallInput.value = override ?? family?.colors.leftWall ?? '#ffffff';
+		wallReset.disabled = override === null;
+	};
+
+	let settingsPanel: SettingsPanel | null = null;
+
 	const refreshMode = () => {
 		if (!editor) return;
 		for (const [mode, button] of Object.entries(modeButtons)) {
@@ -200,8 +216,11 @@ export function mountAdmin(root: HTMLElement) {
 			editCount++;
 			refreshDirty();
 			refreshCatalog();
+			refreshWallColor();
+			if (reason === 'scene' && editor) settingsPanel?.set(editor.getSettings()); // Load latest: show what was loaded
 		} else if (reason === 'room') {
 			refreshCatalog();
+			refreshWallColor();
 		}
 		refreshSelection();
 		if (reason === 'mode') refreshMode();
@@ -211,8 +230,19 @@ export function mountAdmin(root: HTMLElement) {
 	if (!editor) {
 		byId('admin-no-webgl').hidden = false;
 		canvas.hidden = true;
+		// Nothing to preview or edit without the editor: no settings, no wall colour.
+		byId('settings-section').hidden = true;
+		wallInput.disabled = true;
+		wallReset.disabled = true;
 	}
 	showWarnings([...bundled.warnings, ...keptNotes(bundled.scene)]);
+
+	settingsPanel = mountSettingsPanel(settingsBox, {
+		initial: bundled.scene.settings,
+		onChange: (next) => editor?.setSettings(next),
+	});
+	wallInput.addEventListener('input', () => editor?.setWallColor(wallInput.value));
+	wallReset.addEventListener('click', () => editor?.setWallColor(null));
 
 	for (const entry of CATALOG) {
 		const button = document.createElement('button');
@@ -427,6 +457,7 @@ export function mountAdmin(root: HTMLElement) {
 	refreshDirty();
 	refreshCatalog();
 	refreshSelection();
+	refreshWallColor();
 	setStatus(
 		readToken()
 			? 'Token ready. "Load latest" fetches the current scene from GitHub.'

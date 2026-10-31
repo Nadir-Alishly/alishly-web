@@ -12,6 +12,23 @@ const pdfWalls = {
   elnur: '#dff2fe', sabina: '#ede9fe', nadir: '#ecfcca', chinara: '#ffe4e6',
   alibala: '#ffedd4', elkhan: '#fef9c2', fazil: '#cbfbf1',
 };
+// scene.json can override a room's wall colour (scene-settings): what pages must show is the EFFECTIVE colour. The same
+// source modules the build uses give the expectation: no override = the v2 PDF colour (pdfWalls, floor from family.ts);
+// override = both walls the override (lower-case), floor = floorOf(override).
+const sceneTs = await import(new URL('../src/data/scene.ts', import.meta.url).href);
+const settingsTs = await import(new URL('../src/data/scene-settings.ts', import.meta.url).href);
+const effTs = await import(new URL('../src/data/effective-colors.ts', import.meta.url).href);
+const paletteTs = await import(new URL('../src/data/room-palette.ts', import.meta.url).href);
+const familyTs = await import(new URL('../src/data/family.ts', import.meta.url).href);
+const sceneRaw = JSON.parse(readFileSync(new URL('../src/data/scene.json', import.meta.url), 'utf8'));
+const modelIds = JSON.parse(readFileSync(new URL('../src/data/models.json', import.meta.url), 'utf8')).map((m) => m.id);
+const sceneParsed = sceneTs.parseScene(sceneRaw, { slugs: members.map(([s]) => s), modelIds });
+const overrideOf = (slug) => sceneParsed.scene.rooms[slug]?.wallColor ?? null;
+const expectedColors = (slug) => {
+  const o = overrideOf(slug);
+  if (o) return { leftWall: o, rightWall: o, floor: paletteTs.floorOf(o) };
+  return { leftWall: pdfWalls[slug], rightWall: pdfWalls[slug], floor: familyTs.family.find((m) => m.slug === slug).colors.floor };
+};
 let failed = 0;
 const check = (ok, msg) => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${msg}`); };
 const read = (p) => readFileSync(join(dist, p), 'utf8');
@@ -50,14 +67,18 @@ for (const [slug, name] of members) {
   let parsed; try { parsed = JSON.parse(cfg); } catch {}
   check(parsed?.name === name && ['leftWall', 'rightWall', 'floor'].every((k) => /^#[0-9a-f]{6}$/i.test(parsed.colors?.[k] ?? '')) && !('trim' in (parsed.colors ?? {})), `${slug}: data-room JSON valid`);
   check(/astro-view-transitions-enabled/.test(html), `${slug}: ClientRouter enabled`);
-  // room-colors-v2.pdf: both walls carry the room's exact colour
-  const pdfHex = pdfWalls[slug];
-  check(parsed?.colors?.leftWall?.toLowerCase() === pdfHex && parsed?.colors?.rightWall?.toLowerCase() === pdfHex, `${slug}: both walls are the v2 PDF colour ${pdfHex}`);
+  // room-colors-v2.pdf, or the scene.json wallColor override: both walls carry the room's EFFECTIVE colour, the floor follows
+  const want = expectedColors(slug);
+  check(parsed?.colors?.leftWall?.toLowerCase() === want.leftWall && parsed?.colors?.rightWall?.toLowerCase() === want.rightWall, `${slug}: both walls are the effective colour ${want.leftWall}${overrideOf(slug) ? ' (scene.json wallColor override)' : ' (v2 PDF colour)'}`);
+  check(parsed?.colors?.floor?.toLowerCase() === want.floor, `${slug}: floor tint is the effective ${want.floor}`);
+  check(effTs.effectiveColors(familyTs.family.find((m) => m.slug === slug), sceneParsed.scene).leftWall === want.leftWall, `${slug}: effectiveColors() agrees with the expectation`);
 }
 
 // Distinct palettes
 const palettes = members.map(([s]) => (read(`rooms/${s}/index.html`).match(/data-room="([^"]+)"/)?.[1] ?? ''));
 check(new Set(palettes).size === 7, 'all 7 palettes are distinct');
+const effPalettes = members.map(([s]) => JSON.stringify(expectedColors(s)));
+check(new Set(effPalettes).size === 7, 'all 7 effective colour sets are distinct (override included)');
 check(!palettes.some((p) => /trim/i.test(p)), 'no data-room JSON carries a "trim" colour');
 
 // Texture preloads: room pages and /admin preload the 4 texture URLs (same crossorigin mode as the TextureLoader), the picker none
@@ -141,8 +162,7 @@ for (const [slug] of members) {
 
 // Source scene data parses and validates (uses the same module as the build)
 {
-  const sceneTs = await import(new URL('../src/data/scene.ts', import.meta.url).href);
-  const raw = JSON.parse(readFileSync(new URL('../src/data/scene.json', import.meta.url), 'utf8'));
+  const raw = sceneRaw;
   const modelsJson = JSON.parse(readFileSync(new URL('../src/data/models.json', import.meta.url), 'utf8'));
   const slugs = members.map(([s]) => s);
   const res = sceneTs.parseScene(raw, { slugs, modelIds: modelsJson.map((m) => m.id) });
@@ -155,6 +175,36 @@ for (const [slug] of members) {
     try { return JSON.stringify(JSON.parse(decodeAttr(html.match(/data-room="([^"]+)"/)[1])).objects) === JSON.stringify(res.scene.rooms[s].objects); } catch { return false; }
   });
   check(same, 'data-room objects of each room equal the validated scene.json objects');
+  // scene-settings: scene.json's `settings` / `wallColor` are valid and reach every page
+  check(res.warnings.length === 0, 'scene.json settings and wallColor parse without warnings');
+  check(!('settings' in raw) || (typeof raw.settings === 'object' && raw.settings !== null), 'scene.json `settings`, when present, is an object');
+  check(Object.keys(raw).join() === (('settings' in raw) ? 'version,settings,rooms' : 'version,rooms'), `scene.json top-level key order is version${'settings' in raw ? ',settings' : ''},rooms`);
+  check(sceneTs.serializeScene(res.scene) === readFileSync(new URL('../src/data/scene.json', import.meta.url), 'utf8'), 'scene.json is byte-identical to serializeScene(parseScene(scene.json)) (canonical, sparse)');
+  for (const s of slugs) {
+    const w = raw.rooms?.[s]?.wallColor;
+    check(w === undefined || /^#[0-9a-f]{6}$/.test(w), `${s}: wallColor ${w ?? '(none)'} is a lower-case #rrggbb or absent`);
+  }
+  // every room page carries the SAME complete, valid settings object (the parsed scene.json settings)
+  const want = res.scene.settings;
+  const rangeOk = (g, k, v) => typeof v === 'number' && Number.isFinite(v) && v >= settingsTs.SETTING_RANGES[g][k].min && v <= settingsTs.SETTING_RANGES[g][k].max;
+  for (const s of slugs) {
+    let cfg; try { cfg = JSON.parse(decodeAttr(read(`rooms/${s}/index.html`).match(/data-room="([^"]+)"/)[1])); } catch {}
+    const st = cfg?.settings;
+    const complete = !!st && typeof st === 'object' && Object.keys(st).join() === settingsTs.SETTINGS_GROUPS.join()
+      && settingsTs.SETTINGS_GROUPS.every((g) => Object.keys(st[g] ?? {}).join() === Object.keys(settingsTs.DEFAULT_SETTINGS[g]).join());
+    check(complete, `${s}: data-room.settings has all ${settingsTs.SETTINGS_GROUPS.length} groups with every key`);
+    const valid = complete && settingsTs.SETTINGS_GROUPS.every((g) => Object.entries(st[g]).every(([k, v]) =>
+      typeof settingsTs.DEFAULT_SETTINGS[g][k] === 'string' ? /^#[0-9a-f]{6}$/.test(v) : rangeOk(g, k, v)));
+    check(valid, `${s}: data-room.settings values are in range / valid colours`);
+    check(complete && JSON.stringify(st) === JSON.stringify(want), `${s}: data-room.settings equals the settings of scene.json`);
+  }
+  // the picker swatches show the effective colours (left wall, right wall, floor)
+  for (const s of slugs) {
+    const card = index.match(new RegExp(`<a href="/rooms/${s}/"[\\s\\S]*?</a>`))?.[0] ?? '';
+    const bg = [...card.matchAll(/background:(#[0-9a-fA-F]{6})/g)].map((m) => m[1].toLowerCase());
+    const w = expectedColors(s);
+    check(bg.join() === [w.leftWall, w.rightWall, w.floor].join(), `picker swatch of ${s} is ${w.leftWall}/${w.rightWall}/${w.floor} (got ${bg.join('/') || 'none'})`);
+  }
   check(Array.isArray(modelsJson) && modelsJson.every((m) => m.id && m.label && m.file && typeof m.defaultScale === 'number'), 'models.json entries have id,label,file,defaultScale');
   check(modelsJson.every((m) => existsSync(join(dist, m.file))), 'every models.json file exists in dist');
 }
@@ -209,6 +259,10 @@ if (adminOk) {
   const bundle = adminJs.map((u) => readFileSync(join(dist, u), 'utf8')).join('\n');
   check(/api\.github\.com/.test(bundle), 'admin bundle talks to api.github.com');
   check(/TransformControls/.test(bundle), 'admin bundle includes TransformControls');
+  check(['Scene settings', 'Floor texture', 'Window glow', 'Advanced shadows', 'Reset to defaults'].every((t) => bundle.includes(t) || admin.includes(t)), 'admin: the settings panel schema (group titles, Reset to defaults) is in the admin page/bundle');
+  for (const id of ['settings-panel', 'room-wall-color', 'room-wall-reset']) check(new RegExp(`id="${id}"`).test(admin), `admin: has #${id}`);
+  check(/<input[^>]*id="room-wall-color"[^>]*type="color"|<input[^>]*type="color"[^>]*id="room-wall-color"/.test(admin), 'admin: wall colour input is type=color');
+  check(!/<script[^>]*>[^<]*Floor texture/.test(admin), 'admin: schema text is not inlined into the page');
 }
 
 // Public pages: no admin link, no editor/GitHub code in any JS they can load
@@ -237,6 +291,12 @@ check(!reachFiles.some((p) => /TransformControls/.test(read(p))), 'no "Transform
 check(!reachFiles.some((p) => /api\.github\.com/.test(read(p))), 'no "api.github.com" in any JS reachable from public pages');
 check(!reachFiles.some((p) => /alishly-admin-token/.test(read(p))), 'no admin token storage key in any JS reachable from public pages');
 check(!reachFiles.some((p) => /index\.astro_astro_type_script/.test(p)), 'admin entry chunk is not reachable from public pages');
+// scene-settings: the admin-only panel schema (labels, hints, grouping) must not ship to the public
+for (const marker of ['Floor texture', 'Advanced shadows', 'Reset to defaults', 'Shadow bias fixes speckles', "Exposure doesn't dim", 'Bump strength', 'Scene settings', 'setting-floor']) {
+  check(!reachFiles.some((p) => read(p).includes(marker)), `no admin settings-panel text "${marker}" in any JS reachable from public pages`);
+  check(publicPages.every((f) => !read(f).includes(marker)), `no "${marker}" in the HTML of public pages`);
+}
+check(!reachFiles.some((p) => /room-wall-color|settings-panel/.test(read(p))), 'no settings-panel / room-wall-color element ids in public JS');
 // Inline module scripts on public pages must not contain admin/GitHub code either
 check(publicPages.every((f) => ![...read(f).matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].some((m) => /TransformControls|api\.github\.com/.test(m[1]))), 'no editor/GitHub code in inline scripts of public pages');
 // Picker still loads no three.js (only the ClientRouter chunk)

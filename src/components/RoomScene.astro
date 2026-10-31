@@ -1,15 +1,20 @@
 ---
-import type { FamilyMember } from '../data/family';
+import type { FamilyMember, RoomColors } from '../data/family';
 import type { SceneObject } from '../data/scene';
+import type { SceneSettings } from '../data/scene-settings';
 
 interface Props {
 	member: FamilyMember;
 	/** The room's furniture from scene.json, already validated. */
 	objects?: SceneObject[];
+	/** The colours to draw: family.ts, or the wall colour override from scene.json (effectiveColors). */
+	colors?: RoomColors;
+	/** The global look from scene.json (complete, validated). Omitted = the defaults. */
+	settings?: SceneSettings;
 }
 
-const { member, objects = [] } = Astro.props;
-const config = JSON.stringify({ name: member.name, colors: member.colors, objects });
+const { member, objects = [], colors = member.colors, settings } = Astro.props;
+const config = JSON.stringify({ name: member.name, colors, objects, settings });
 ---
 
 {/*

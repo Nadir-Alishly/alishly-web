@@ -33,13 +33,15 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import type { RoomColors } from '../data/family';
 import { ROOM_DIMS } from '../data/scene';
 import { FLOOR_PLANKS, mulberry32, plankLayout } from '../data/room-floor';
-import { haloRect, HALO_SPREAD, polygonBounds, POOL_SPREAD, sunPatch } from '../data/room-glow';
+import { haloRect, polygonBounds, sunPatch } from '../data/room-glow';
 import type { Rect } from '../data/room-glow';
 import { floorMultiplier, OAK_LINEAR, WOOD_EDGE, wallTint } from '../data/room-palette';
 import { OAK_DIFFUSE_URL, OAK_ROUGHNESS_URL, STUCCO_DETAIL_URL, STUCCO_NORMAL_URL } from '../data/room-textures';
 import { boxUvs } from '../data/room-uv';
 import { leftWallPieces, WINDOW_OPENING, windowFrame } from '../data/room-window';
-import { SUN_POSITION as SUN_XYZ, sunBlockerBox, wallCaps } from '../data/room-sun';
+import { sunBlockerFor, wallCaps } from '../data/room-sun';
+import { DEFAULT_SETTINGS, SETTING_RANGES, keyDirection, sunDirection } from '../data/scene-settings';
+import type { SceneSettings } from '../data/scene-settings';
 import type { SceneObject } from '../data/scene';
 import { createObjectManager } from './room-objects';
 import type { ObjectManager } from './room-objects';
@@ -49,6 +51,11 @@ export interface RoomConfig {
 	colors: RoomColors;
 	/** Furniture of the room. Applied by createRoomScene(); the core itself only draws the room shell. */
 	objects?: readonly SceneObject[];
+	/**
+	 * Global look (textures, sun, glow, lights); omitted = the defaults. Read when the core is created; later changes
+	 * go through `setSettings`, so `setRoom` ignores it (every room carries the same settings).
+	 */
+	settings?: SceneSettings;
 }
 
 /**
@@ -67,6 +74,10 @@ export interface RoomCore {
 	invalidate(): void;
 	/** Swap to another room's shell in place: tweens colours, eases the camera home. Does not touch objects. */
 	setRoom(config: RoomConfig): void;
+	/** Show these colours at once (no tween, no camera move): live editing of the current room's walls. */
+	setColors(colors: RoomColors): void;
+	/** Apply new global settings live (textures, lights, sun, glow). Expects a complete, in-range SceneSettings. */
+	setSettings(settings: SceneSettings): void;
 	/** Release every GPU/DOM resource. Safe to call more than once. */
 	dispose(): void;
 }
@@ -89,52 +100,42 @@ const ZOOM_MAX = 2.2;
 
 const TWEEN_MS = 400;
 
-// Lighting (bright, soft daylight). Colours are sRGB hex; intensities are for physical lights under Neutral tone mapping.
-const KEY_COLOR = 0xfff0d9; // warm key from the open front, soft contact shadows
-const KEY_INTENSITY = 1.8;
-const KEY_POSITION = new Vector3(4.5, 9, 8); // leans to +z: the right wall catches more of it than the window wall
+// Lighting (bright, soft daylight). The colours, intensities, angles, shadow radius/bias and exposure are SETTINGS
+// (src/data/scene-settings.ts, defaults = the values this file used to hold, tunable from /admin); what stays here are the
+// map sizes (not exposed: they reallocate render targets) and the margin of the shadow cameras.
+// Key: warm light from the open front, leaning to +z so the right wall catches more of it than the window wall.
+// Sun: outside the left wall, shines through the window; its floor patch is the room's bright spot.
+// Shadow radius: 5 PCF taps, so a larger radius turns into grain (settings clamp it to 0..6).
+const MAX_SHADOW_RADIUS = Math.min(SETTING_RANGES.sun.shadowRadius.max, SETTING_RANGES.key.shadowRadius.max);
 const KEY_MAP_SIZE = 1024;
-const KEY_SHADOW_RADIUS = 4; // 5 PCF taps: a larger radius turns into grain
-const FILL_SKY = 0xe6efff; // cool fill from above, warm bounce from below
-const FILL_GROUND = 0xd9cbb8;
-const FILL_INTENSITY = 0.6;
-const ENV_INTENSITY = 0.2; // RoomEnvironment image-based light: soft ambient bounce
-const SUN_COLOR = 0xffe2b8; // outside the left wall, shines through the window
-const SUN_INTENSITY = 5.2; // the floor patch is the room's bright spot; kept low enough not to clip pale furniture in it
-const SUN_POSITION = new Vector3(...SUN_XYZ);
 const SUN_MAP_SIZE = 2048; // 1024 on touch devices
-const SUN_SHADOW_RADIUS = 4;
 const SHADOW_MARGIN = 0.3;
-const SHADOW_BIAS = -0.0004;
-const SHADOW_NORMAL_BIAS = 0.03;
 // Textures (public/textures, made by scripts/make-textures.sh). Until they are in, the first render is held for at most
 // TEXTURE_WAIT_MS; after that the procedural floor and flat walls are drawn and the textures are swapped in when they arrive.
 const TEXTURE_WAIT_MS = 1500;
-// Oak floor. The material colour is a faint per-room multiplier (floorMultiplier); the oak texture is the colour.
-const FLOOR_TILE = 3.2; // world units per texture repeat: 2 x 2 repeats on the 6.4 floor, boards about 0.23 wide
-const OAK_ROUGHNESS = 1.1; // multiplies the roughness map (mean 0.44): satin, a broad sheen from the key light and the sun
-// Stucco walls (Lambert, so the lighting stays as calibrated). The detail map's mean is WALL_DETAIL_MEAN, undone by WALL_GAIN.
-// The grain is far finer than a screen pixel at the default view, so a big tile (the 1024 px map spans 8 units: texels
-// about a pixel) and a normal scale above 1 are what make it just noticeable there; the detail map's contrast is set in
-// scripts/stucco-detail.py. The normal map is skipped on touch screens.
-const WALL_TILE = 8; // world units per texture repeat
-const WALL_NORMAL_SCALE = 2; // above 1 on purpose: the grain is sub-pixel at the default view
+// Oak floor (settings.floor): tile = world units per texture repeat (3.2: 2 x 2 repeats on the 6.4 floor, boards about 0.23
+// wide), roughness multiplies the roughness map (mean 0.44: satin, a broad sheen from the key light and the sun). The
+// material colour is a faint per-room multiplier (floorMultiplier); the oak texture is the colour.
+// Stucco walls (Lambert, so the lighting stays as calibrated; settings.wall). The detail map's mean is WALL_DETAIL_MEAN,
+// undone by WALL_GAIN. The grain is far finer than a screen pixel at the default view, so a big tile (the 1024 px map spans
+// 8 units: texels about a pixel) and a normal scale above 1 are what make it just noticeable there; the detail map's
+// contrast is set in scripts/stucco-detail.py. The normal map is skipped on touch screens.
+// The wall UVs are baked at WALL_TILE world units per repeat; a different tile is a texture.repeat of WALL_TILE / tile.
+const WALL_TILE = 8;
 // Procedural plank floor, the fallback while the oak is not there. Painted around a light neutral so that `colour x map`
 // reads as the room's wood.
 const FLOOR_TEXTURE_SIZE = 1024; // px; one tile covers the whole 6.4 x 6.4 floor top (160 px per world unit)
 const FLOOR_ROUGHNESS = 0.5; // satin: a broad sheen from the key light and the sun, no mirror image
-const FLOOR_ENV_INTENSITY = 0.35; // image-based light on the floor only (scene.environmentIntensity is 0.2)
 const PLANK_LIGHTNESS = 0.9; // average map value (0..1)
 const PLANK_VARIATION = 0.055; // +- tone shift between planks
 const SEAM_ROW_PX = 3; // seam along the planks
 const SEAM_JOINT_PX = 2.5; // seam at plank ends
-// Window glow: warm-white unlit panes, a halo on the wall around them and a light pool on the floor.
+// Window glow: warm-white unlit panes, a halo on the wall around them and a light pool on the floor. The glow colour
+// (warm: reads as sunlight on pale walls too), opacities and spreads are settings.glow; the pool's opacity default 0.14 is
+// additive on top of the sun patch, and any more clips the oak's red there.
 const PANE_TOP = '#ffffff';
 const PANE_BOTTOM = '#fffdf8'; // near-pure white: the reference's panes are blown out, not cream
-const GLOW_COLOR = 0xffd9a6; // warm tint of the additive halo and pool: reads as sunlight on pale walls too
-const HALO_OPACITY = 0.75;
 const HALO_OFFSET = 0.012; // in front of the wall face, so the two never fight
-const POOL_OPACITY = 0.14; // additive on top of the sun patch: any more clips the oak's red there
 const POOL_Y = 0.004; // above the floor top, with polygonOffset on top
 const DROP_SHADOW_SIZE = 11; // world units; the blob is a blurred square a little smaller than the slab
 const DROP_SHADOW_GAP = 0.35; // below the slab
@@ -301,11 +302,15 @@ function haloTexture(rect: Rect, hole: Rect, spreadPx: number) {
 }
 
 /** Soft light pool on the floor: the sun's patch (a polygon of [x, z] points) with a blurred rim. */
-function poolTexture(points: readonly (readonly [number, number])[], bounds: { x0: number; z0: number; x1: number; z1: number }) {
+function poolTexture(
+	points: readonly (readonly [number, number])[],
+	bounds: { x0: number; z0: number; x1: number; z1: number },
+	spread: number,
+) {
 	const scale = 64; // px per world unit
 	const width = Math.ceil((bounds.x1 - bounds.x0) * scale);
 	const height = Math.ceil((bounds.z1 - bounds.z0) * scale);
-	const { texture } = glowCanvas(width, height, POOL_SPREAD * scale * 0.8, (c) => {
+	const { texture } = glowCanvas(width, height, spread * scale * 0.8, (c) => {
 		c.beginPath();
 		points.forEach(([x, z], i) => {
 			const px = (x - bounds.x0) * scale;
@@ -379,10 +384,13 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 		console.warn('Could not create a WebGL renderer.', error);
 		return null;
 	}
+	// The global look. Read-only: setSettings() swaps the whole object.
+	let settings: SceneSettings = initial.settings ?? DEFAULT_SETTINGS;
+
 	renderer.setClearColor(0x000000, 0);
 	renderer.outputColorSpace = SRGBColorSpace;
 	renderer.toneMapping = NeutralToneMapping; // keeps the pastel palette true
-	renderer.toneMappingExposure = 1;
+	renderer.toneMappingExposure = settings.fill.exposure;
 	renderer.shadowMap.enabled = true;
 	renderer.shadowMap.type = PCFShadowMap; // soft through light.shadow.radius
 	// Shadows are static between edits, so they are only re-rendered after invalidate() (see `shadowDirty`),
@@ -475,45 +483,70 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	pane.position.set(glazing.paneX, (glazing.y0 + glazing.y1) / 2, (glazing.z0 + glazing.z1) / 2);
 	scene.add(pane);
 	// Glow on the wall around the opening. Additive and depth-tested, so furniture in front of the wall hides it.
-	const { rect: haloArea, hole } = haloRect(ROOM_DIMS, WINDOW_OPENING);
-	const halo = new Mesh(
-		new PlaneGeometry(haloArea.z1 - haloArea.z0, haloArea.y1 - haloArea.y0),
-		new MeshBasicMaterial({
-			map: haloTexture(haloArea, hole, (256 * HALO_SPREAD) / (haloArea.z1 - haloArea.z0)),
-			color: GLOW_COLOR,
-			opacity: HALO_OPACITY,
-			transparent: true,
-			blending: AdditiveBlending,
-			depthWrite: false,
-			toneMapped: false,
-		}),
-	);
+	// The plane and its canvas texture are (re)built by rebuildHalo()/rebuildPool() below: the spreads are settings.
+	const haloMaterial = new MeshBasicMaterial({
+		color: settings.glow.color,
+		opacity: settings.glow.haloOpacity,
+		transparent: true,
+		blending: AdditiveBlending,
+		depthWrite: false,
+		toneMapped: false,
+	});
+	const halo = new Mesh(new PlaneGeometry(1, 1), haloMaterial);
 	halo.rotation.y = Math.PI / 2;
-	halo.position.set(-INNER + HALO_OFFSET, (haloArea.y0 + haloArea.y1) / 2, (haloArea.z0 + haloArea.z1) / 2);
 	halo.renderOrder = 1;
 	scene.add(halo);
+	const rebuildHalo = () => {
+		const { rect, hole } = haloRect(ROOM_DIMS, WINDOW_OPENING, settings.glow.haloSpread);
+		halo.geometry.dispose();
+		halo.geometry = new PlaneGeometry(rect.z1 - rect.z0, rect.y1 - rect.y0);
+		haloMaterial.map?.dispose();
+		haloMaterial.map = haloTexture(rect, hole, (256 * settings.glow.haloSpread) / (rect.z1 - rect.z0));
+		haloMaterial.needsUpdate = true;
+		halo.position.set(-INNER + HALO_OFFSET, (rect.y0 + rect.y1) / 2, (rect.z0 + rect.z1) / 2);
+	};
+	rebuildHalo();
 	// Soft pool of light on the floor, around the sun's patch. The patch itself is real sunlight with muntin shadows.
-	const patch = sunPatch(ROOM_DIMS, WINDOW_OPENING, SUN_XYZ);
-	const poolArea = polygonBounds(patch, POOL_SPREAD);
-	const pool = new Mesh(
-		new PlaneGeometry(poolArea.x1 - poolArea.x0, poolArea.z1 - poolArea.z0),
-		new MeshBasicMaterial({
-			map: poolTexture(patch, poolArea),
-			color: GLOW_COLOR,
-			opacity: POOL_OPACITY,
-			transparent: true,
-			blending: AdditiveBlending,
-			depthWrite: false,
-			toneMapped: false,
-			polygonOffset: true,
-			polygonOffsetFactor: -2,
-			polygonOffsetUnits: -2,
-		}),
-	);
+	const poolMaterial = new MeshBasicMaterial({
+		color: settings.glow.color,
+		opacity: settings.glow.poolOpacity,
+		transparent: true,
+		blending: AdditiveBlending,
+		depthWrite: false,
+		toneMapped: false,
+		polygonOffset: true,
+		polygonOffsetFactor: -2,
+		polygonOffsetUnits: -2,
+	});
+	const pool = new Mesh(new PlaneGeometry(1, 1), poolMaterial);
 	pool.rotation.x = -Math.PI / 2;
-	pool.position.set((poolArea.x0 + poolArea.x1) / 2, POOL_Y, (poolArea.z0 + poolArea.z1) / 2);
 	pool.renderOrder = 1;
 	scene.add(pool);
+	// The sun's position decides where the patch lands (see applySun), so the pool is rebuilt with it. Cut off at the
+	// floor's edge: a low sun throws its patch past the slab, and the glow must not float in the air there.
+	const rebuildPool = () => {
+		const patch = sunPatch(ROOM_DIMS, WINDOW_OPENING, sunXyz());
+		const grown = polygonBounds(patch, settings.glow.poolSpread);
+		const area = {
+			x0: Math.max(grown.x0, -HALF),
+			x1: Math.min(grown.x1, HALF),
+			z0: Math.max(grown.z0, -HALF),
+			z1: Math.min(grown.z1, HALF),
+		};
+		pool.geometry.dispose();
+		poolMaterial.map?.dispose();
+		poolMaterial.map = null;
+		pool.visible = area.x1 - area.x0 > 0.05 && area.z1 - area.z0 > 0.05;
+		if (!pool.visible) {
+			pool.geometry = new PlaneGeometry(1, 1);
+			return;
+		}
+		pool.geometry = new PlaneGeometry(area.x1 - area.x0, area.z1 - area.z0);
+		poolMaterial.map = poolTexture(patch, area, settings.glow.poolSpread);
+		poolMaterial.needsUpdate = true;
+		pool.position.set((area.x0 + area.x1) / 2, POOL_Y, (area.z0 + area.z1) / 2);
+	};
+	const sunXyz = () => sunDirection(settings.sun.azimuth, settings.sun.elevation);
 
 	// Soft shadow on the page background under the floating room.
 	const dropShadow = new Mesh(
@@ -528,7 +561,7 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	scene.add(objects.root);
 
 	// --- Light ----------------------------------------------------------------
-	const fill = new HemisphereLight(FILL_SKY, FILL_GROUND, FILL_INTENSITY);
+	const fill = new HemisphereLight(settings.fill.sky, settings.fill.ground, settings.fill.intensity);
 	scene.add(fill);
 
 	const roomBounds = new Box3(
@@ -537,17 +570,39 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	);
 	// Shadow-only extension of the left wall (see sunBlockerBox): draws nothing, only casts into the sun's shadow map.
 	// It keeps the sun off furniture and the rest of the room, including against the back wall, whatever the caps show.
-	const sunBlocker = sunBlockerBox(ROOM_DIMS);
-	const blocker = partOf(new MeshBasicMaterial({ colorWrite: false, depthWrite: false }), sunBlocker);
+	// The blocker follows the sun's direction (sunBlockerFor derives its back margin and top; for the default sun it is the
+	// original box). It is a scaled/moved copy of the unit box, so a new direction only moves and scales the mesh.
+	const blocker = partOf(new MeshBasicMaterial({ colorWrite: false, depthWrite: false }), sunBlockerFor(ROOM_DIMS, sunXyz()));
 	blocker.receiveShadow = false;
 	// The sun's shadow camera must contain the whole blocker, or its back end is clipped and the sun leaks past it over the right wall.
-	const sunBounds = roomBounds
-		.clone()
-		.expandByPoint(v(...sunBlocker.min))
-		.expandByPoint(v(...sunBlocker.max));
+	const sunBounds = new Box3();
+	const placeBlocker = () => {
+		const b = sunBlockerFor(ROOM_DIMS, sunXyz());
+		const min = v(...(b.min as [number, number, number]));
+		const max = v(...(b.max as [number, number, number]));
+		blocker.scale.subVectors(max, min);
+		blocker.position.addVectors(min, max).multiplyScalar(0.5);
+		sunBounds.copy(roomBounds).expandByPoint(min).expandByPoint(max);
+	};
+	placeBlocker();
+	// The light's distance is free (it is directional): a tall blocker at a high sun must not reach past the light, or its
+	// top is clipped by the shadow camera's near plane. Same direction, pushed back only when needed; the default sun keeps
+	// its exact position.
+	const SUN_CLEARANCE = 2;
+	const sunPosition = () => {
+		const p = v(...sunXyz());
+		const u = p.clone().normalize();
+		let depth = -Infinity;
+		for (const x of [sunBounds.min.x, sunBounds.max.x]) {
+			for (const y of [sunBounds.min.y, sunBounds.max.y]) {
+				for (const z of [sunBounds.min.z, sunBounds.max.z]) depth = Math.max(depth, u.x * x + u.y * y + u.z * z);
+			}
+		}
+		return depth + SUN_CLEARANCE > p.length() ? u.multiplyScalar(depth + SUN_CLEARANCE) : p;
+	};
 
 	const shadowLight = (
-		color: number,
+		color: string,
 		intensity: number,
 		position: Vector3,
 		mapSize: number,
@@ -558,18 +613,34 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 		light.position.copy(position); // aims at the origin (the default target)
 		light.castShadow = true;
 		light.shadow.mapSize.setScalar(Math.min(mapSize, renderer.capabilities.maxTextureSize));
-		light.shadow.radius = radius;
-		light.shadow.bias = SHADOW_BIAS;
-		light.shadow.normalBias = SHADOW_NORMAL_BIAS;
+		light.shadow.radius = MathUtils.clamp(radius, 0, MAX_SHADOW_RADIUS);
+		light.shadow.bias = settings.shadows.bias;
+		light.shadow.normalBias = settings.shadows.normalBias;
 		fitShadowCamera(light, bounds);
 		scene.add(light);
 		return light;
 	};
-	const keyLight = shadowLight(KEY_COLOR, KEY_INTENSITY, KEY_POSITION, KEY_MAP_SIZE, KEY_SHADOW_RADIUS, roomBounds);
+	const keyXyz = () => keyDirection(settings.key.azimuth, settings.key.elevation);
+	const keyLight = shadowLight(
+		settings.key.color,
+		settings.key.intensity,
+		v(...keyXyz()),
+		KEY_MAP_SIZE,
+		settings.key.shadowRadius,
+		roomBounds,
+	);
 	// The sun stands outside the left wall: only the window opening lets its light (and the muntins' shadows) in.
 	const sunMapSize = coarsePointer ? 1024 : SUN_MAP_SIZE;
-	const sunLight = shadowLight(SUN_COLOR, SUN_INTENSITY, SUN_POSITION, sunMapSize, SUN_SHADOW_RADIUS, sunBounds);
+	const sunLight = shadowLight(
+		settings.sun.color,
+		settings.sun.intensity,
+		sunPosition(),
+		sunMapSize,
+		settings.sun.shadowRadius,
+		sunBounds,
+	);
 	const lights = [keyLight, sunLight];
+	rebuildPool();
 
 	// Soft image-based ambient light. Optional: without it (no PMREM support) the scene just looks flatter.
 	let environment: WebGLRenderTarget | null = null;
@@ -586,10 +657,10 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 			room = new RoomEnvironment();
 			target = generator.fromScene(room, 0.04);
 			scene.environment = target.texture;
-			scene.environmentIntensity = ENV_INTENSITY;
+			scene.environmentIntensity = settings.fill.envIntensity;
 			// A material's own envMap is what lets it use its own intensity (the scene's applies otherwise).
 			floorTop.envMap = target.texture;
-			floorTop.envMapIntensity = FLOOR_ENV_INTENSITY;
+			floorTop.envMapIntensity = settings.floor.envIntensity;
 			floorTop.needsUpdate = true;
 			environment = target;
 		} catch (error) {
@@ -625,6 +696,93 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	};
 	applyColors(initial.colors);
 	let current = initial;
+
+	// --- Settings ---------------------------------------------------------------------------------------
+	// Texture mapping of one map: tile size (as a repeat), rotation, offset in tiles. Rotation and scale pivot on uv
+	// (0.5, 0.5): on the floor (uv 0..1 across the top face) that is the middle of the floor; on the walls (world-space uv,
+	// 8 units per uv unit) it is the point 4 units along each projected axis, which is only a fixed pivot, not a landmark.
+	// The offset is shifted by 0.5 * (repeat - 1) so that with no rotation the
+	// transform is exactly "repeat from the uv origin" (the look before these settings existed). That also makes the
+	// pivot keep showing the same texel whatever the rotation: for the floor that is its middle; for the walls it is
+	// just the fixed point above, not a landmark. EVERY map of a material gets the same transform, or the
+	// normal map's tangent frame would not match the diffuse grain.
+	const mapTransform = (
+		texture: Texture | null,
+		repeat: number,
+		rotation: number,
+		offsetX: number,
+		offsetY: number,
+	) => {
+		if (!texture) return;
+		texture.center.set(0.5, 0.5);
+		texture.rotation = MathUtils.degToRad(rotation);
+		texture.repeat.setScalar(repeat);
+		texture.offset.set(offsetX + 0.5 * (repeat - 1), offsetY + 0.5 * (repeat - 1));
+	};
+	// Everything about the loaded oak/stucco that settings control. Called when settings change AND when late maps arrive.
+	const applyTextureSettings = () => {
+		const { floor, wall } = settings;
+		if (oakFloor) {
+			const repeat = (2 * HALF) / floor.tile;
+			mapTransform(floorTop.map, repeat, floor.rotation, floor.offsetX, floor.offsetY);
+			mapTransform(floorTop.roughnessMap, repeat, floor.rotation, floor.offsetX, floor.offsetY);
+		}
+		floorTop.roughness = oakFloor && floorTop.roughnessMap ? floor.roughness : FLOOR_ROUGHNESS;
+		if (stuccoWalls) {
+			const repeat = WALL_TILE / wall.tile;
+			for (const material of [mats.leftWall, mats.rightWall]) {
+				mapTransform(material.map, repeat, wall.rotation, wall.offsetX, wall.offsetY);
+				mapTransform(material.normalMap, repeat, wall.rotation, wall.offsetX, wall.offsetY);
+			}
+		}
+		for (const material of [mats.leftWall, mats.rightWall]) material.normalScale.setScalar(wall.normalScale);
+	};
+	// Cheap writes: uniforms and properties, no rebuild.
+	const applyLiveSettings = () => {
+		const { fill: f, floor, key, sun, glow, shadows } = settings;
+		renderer.toneMappingExposure = f.exposure;
+		fill.color.set(f.sky);
+		fill.groundColor.set(f.ground);
+		fill.intensity = f.intensity;
+		scene.environmentIntensity = f.envIntensity;
+		floorTop.envMapIntensity = floor.envIntensity;
+		for (const [light, s] of [[keyLight, key], [sunLight, sun]] as const) {
+			light.color.set(s.color);
+			light.intensity = s.intensity;
+			light.shadow.radius = MathUtils.clamp(s.shadowRadius, 0, MAX_SHADOW_RADIUS);
+			light.shadow.bias = shadows.bias;
+			light.shadow.normalBias = shadows.normalBias;
+		}
+		haloMaterial.color.set(glow.color);
+		haloMaterial.opacity = glow.haloOpacity;
+		poolMaterial.color.set(glow.color);
+		poolMaterial.opacity = glow.poolOpacity;
+		applyTextureSettings();
+	};
+	// Rebuilds are deferred: setSettings() only raises a flag and frame() runs them once before the shadow update, so a
+	// slider dragged faster than the frame rate costs one rebuild per frame.
+	let sunDirty = false;
+	let poolDirty = false;
+	let haloDirty = false;
+	let keyDirty = false;
+	const runRebuilds = () => {
+		if (sunDirty) applySun(); // includes the pool
+		else if (poolDirty) rebuildPool();
+		if (haloDirty) rebuildHalo();
+		if (keyDirty) applyKey();
+		sunDirty = poolDirty = haloDirty = keyDirty = false;
+	};
+	// The sun's direction moves the light, the blocker and the shadow camera, and the pool follows the patch.
+	const applySun = () => {
+		placeBlocker();
+		sunLight.position.copy(sunPosition());
+		fitShadowCamera(sunLight, sunBounds);
+		rebuildPool();
+	};
+	const applyKey = () => {
+		keyLight.position.set(...keyXyz());
+		fitShadowCamera(keyLight, roomBounds);
+	};
 
 	// --- Camera and controls ------------------------------------------------
 	const camera = new OrthographicCamera(-1, 1, 1, -1, 0.1, CAMERA_DISTANCE * 2.5);
@@ -691,6 +849,8 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	const frame = (now: number) => {
 		raf = 0;
 		let tweening = false;
+
+		runRebuilds(); // settings changes that need new geometry/textures/shadow cameras, before the shadow maps are drawn
 
 		const colors = colorTween;
 		if (colors) {
@@ -823,14 +983,12 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 			rough?.dispose();
 			return;
 		}
-		diffuse.repeat.setScalar((2 * HALF) / FLOOR_TILE);
-		rough?.repeat.copy(diffuse.repeat);
 		fallbackFloorMap.dispose();
 		floorTop.map = diffuse;
 		floorTop.roughnessMap = rough;
-		floorTop.roughness = rough ? OAK_ROUGHNESS : FLOOR_ROUGHNESS;
-		floorTop.needsUpdate = true;
 		oakFloor = true;
+		applyTextureSettings(); // tile, rotation, offset on both maps; roughness
+		floorTop.needsUpdate = true;
 		recolor();
 	};
 	const loadWalls = async () => {
@@ -846,10 +1004,10 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 		for (const material of [mats.leftWall, mats.rightWall]) {
 			material.map = detail;
 			material.normalMap = normal;
-			material.normalScale.setScalar(WALL_NORMAL_SCALE);
 			material.needsUpdate = true;
 		}
 		stuccoWalls = true;
+		applyTextureSettings(); // tile, rotation, offset on both maps; normal scale
 		recolor();
 	};
 	const release = () => {
@@ -880,6 +1038,24 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 		canvas,
 		objects,
 		invalidate,
+		setColors(colors) {
+			if (disposed) return;
+			current = { ...current, colors };
+			colorTween = null; // a running tween would end on the old colours
+			applyColors(colors);
+			invalidate();
+		},
+		setSettings(next) {
+			if (disposed) return;
+			const prev = settings;
+			settings = next;
+			applyLiveSettings();
+			if (next.sun.azimuth !== prev.sun.azimuth || next.sun.elevation !== prev.sun.elevation) sunDirty = true;
+			if (next.glow.poolSpread !== prev.glow.poolSpread) poolDirty = true;
+			if (next.glow.haloSpread !== prev.glow.haloSpread) haloDirty = true;
+			if (next.key.azimuth !== prev.key.azimuth || next.key.elevation !== prev.key.elevation) keyDirty = true;
+			invalidate();
+		},
 		setRoom(config) {
 			if (disposed) return;
 			canvas.setAttribute('aria-label', ariaLabel(config));

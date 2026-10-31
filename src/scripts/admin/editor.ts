@@ -8,6 +8,7 @@ import { Box3, BoxHelper, MathUtils, Raycaster, Vector2 } from 'three';
 import type { Object3D } from 'three';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import type { RoomColors } from '../../data/family';
+import { effectiveColors } from '../../data/effective-colors';
 import {
 	LIMITS,
 	ROOM_BOUNDS,
@@ -17,6 +18,8 @@ import {
 	shiftIntoRange,
 } from '../../data/scene';
 import type { SceneData, SceneObject, Vec3 } from '../../data/scene';
+import { COLOR_RE, parseSettings } from '../../data/scene-settings';
+import type { SceneSettings } from '../../data/scene-settings';
 import { createRoomCore } from '../room-core';
 import { catalogEntry, createObjectData } from '../room-objects';
 
@@ -65,6 +68,14 @@ export interface Editor {
 	setSelectedColor(hex: string | null): void;
 	/** Typed values are not snapped; they are kept inside the room when that option is on. */
 	setSelectedTransform(patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }): void;
+	/** The global scene settings (a copy). */
+	getSettings(): SceneSettings;
+	/** Replaces the global settings (clamped and rounded like the file parser would), previews them live. Emits `edit`. */
+	setSettings(next: SceneSettings): void;
+	/** The current room's wall colour override (`#rrggbb`), or null when it uses family.ts. */
+	getWallColor(): string | null;
+	/** `null` goes back to the family.ts colour. Both walls change, the floor tint follows. Previews live, emits `edit`. */
+	setWallColor(hex: string | null): void;
 	dispose(): void;
 }
 
@@ -100,7 +111,8 @@ const isTyping = (target: EventTarget | null) => {
 	if (target.isContentEditable) return true;
 	if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;
 	if (target instanceof HTMLInputElement) {
-		return !['checkbox', 'radio', 'button', 'range', 'submit', 'reset'].includes(target.type);
+		// A focused slider counts as typing too: its arrow keys are its own, and Delete/W/E/R must not reach the scene.
+		return !['checkbox', 'radio', 'button', 'submit', 'reset'].includes(target.type);
 	}
 	return false;
 };
@@ -112,8 +124,10 @@ export function createEditor(options: EditorOptions): Editor | null {
 	let data = cloneScene(options.scene);
 	for (const r of rooms) data.rooms[r.slug] ??= { objects: [] };
 	let room = rooms[0].slug;
+	// What the room is drawn with: family.ts, or the wall colour override in the data.
+	const colorsOf = (slug: string) => effectiveColors(info(slug), data);
 
-	const core = createRoomCore(canvas, { name: info(room).name, colors: info(room).colors });
+	const core = createRoomCore(canvas, { name: info(room).name, colors: colorsOf(room), settings: data.settings });
 	if (!core) return null;
 	const { objects } = core;
 
@@ -330,6 +344,8 @@ export function createEditor(options: EditorOptions): Editor | null {
 			for (const r of rooms) data.rooms[r.slug] ??= { objects: [] };
 			pendingFit.clear();
 			objects.replaceAll(shownObjects());
+			core.setSettings(data.settings);
+			core.setColors(colorsOf(room));
 			core.invalidate();
 			emit('scene');
 		},
@@ -340,7 +356,7 @@ export function createEditor(options: EditorOptions): Editor | null {
 			room = slug;
 			pendingFit.clear();
 			objects.replaceAll(shownObjects());
-			core.setRoom({ name: info(room).name, colors: info(room).colors });
+			core.setRoom({ name: info(room).name, colors: colorsOf(room) });
 			canvas.setAttribute('aria-label', describe());
 			emit('room');
 		},
@@ -406,7 +422,7 @@ export function createEditor(options: EditorOptions): Editor | null {
 			const object = selected ? find(selected) : undefined;
 			if (!object) return;
 			if (hex === null) delete object.color;
-			else if (/^#[0-9a-fA-F]{6}$/.test(hex)) object.color = hex.toLowerCase();
+			else if (COLOR_RE.test(hex)) object.color = hex.toLowerCase();
 			else return;
 			objects.update(object);
 			core.invalidate();
@@ -429,6 +445,26 @@ export function createEditor(options: EditorOptions): Editor | null {
 			}
 			updateHighlight();
 			core.invalidate();
+			emit('edit');
+		},
+
+		getSettings: () => parseSettings(data.settings).settings,
+		setSettings(next) {
+			data.settings = parseSettings(next).settings;
+			core.setSettings(data.settings);
+			emit('edit');
+		},
+
+		getWallColor: () => data.rooms[room].wallColor ?? null,
+		setWallColor(hex) {
+			const entry = data.rooms[room];
+			if (hex === null) delete entry.wallColor;
+			else if (COLOR_RE.test(hex)) {
+				// The family colour itself is not an override (the file stays free of it).
+				if (hex.toLowerCase() === info(room).colors.leftWall) delete entry.wallColor;
+				else entry.wallColor = hex.toLowerCase();
+			} else return;
+			core.setColors(colorsOf(room));
 			emit('edit');
 		},
 

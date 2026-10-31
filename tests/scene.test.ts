@@ -195,7 +195,9 @@ test('serializeScene: 2-space indent, trailing newline, parses back to the same 
 	const text = serializeScene(r.scene);
 	assert.ok(text.endsWith('}\n') && !text.endsWith('\n\n'));
 	assert.match(text, /^\{\n {2}"version": 1,\n/);
-	assert.deepEqual(JSON.parse(text), r.scene);
+	// `settings` is stored sparse (only differences from the defaults), so the file text itself lacks the complete
+	// settings object; the parsed file equals the scene. Sparse storage is covered in tests/scene-settings.test.ts.
+	assert.deepEqual(Object.keys(JSON.parse(text)), ['version', 'rooms'], 'default settings are not written');
 	assert.deepEqual(parseScene(JSON.parse(text), opts).scene, r.scene);
 	assert.equal(serializeScene(parseScene(JSON.parse(text), opts).scene), text, 'stable under reparse');
 });

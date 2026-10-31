@@ -33,9 +33,30 @@ export const BLOCKER_BACK_MARGIN = 0.9;
  * along z from -(half + backMargin) to +half. The sun is low enough that the floor is shaded, but it would still
  * reach raised surfaces on the right over the wall top. Draws nothing; only casts into the sun's shadow map.
  */
-export function sunBlockerBox(dims: BlockerDims, backMargin = BLOCKER_BACK_MARGIN): Box {
+export function sunBlockerBox(dims: BlockerDims, backMargin = BLOCKER_BACK_MARGIN, top = BLOCKER_TOP): Box {
 	const { half, inner, wallHeight } = dims;
-	return { min: [-half, wallHeight, -(half + backMargin)], max: [-inner, BLOCKER_TOP, half] };
+	return { min: [-half, wallHeight, -(half + backMargin)], max: [-inner, top, half] };
+}
+
+/** Slack added on top of the ray drift / rise that `sunBlockerFor` derives (world units). */
+export const BLOCKER_DRIFT_SLACK = 0.3;
+export const BLOCKER_RISE_SLACK = 0.2;
+
+/**
+ * The blocker for a sun at `sun` (a direction towards the sun from the origin, x < 0, y > 0, z <= 0). The back margin
+ * and the top follow the direction: rays from anything in the room (x up to `half`) towards the sun cross the left wall
+ * (x = -inner) displaced by `(half + inner) * |sz / sx|` towards -z and raised by `(half + inner) * sy / |sx|`. The
+ * blocker must reach that far back and up, or sun leaks over the wall tops. Never smaller than the original box
+ * (BLOCKER_BACK_MARGIN / BLOCKER_TOP), so the default sun gets exactly the box it always had. Valid for the sun domain of
+ * SETTING_RANGES.sun (swept by tasks/2026-10-31-scene-settings/sun-domain.mts).
+ */
+export function sunBlockerFor(dims: BlockerDims, sun: Vec3): Box {
+	const [sx, sy, sz] = sun;
+	if (!(sx < 0) || !(sy > 0)) throw new RangeError('The sun must be outside the left wall (x < 0) and above the floor.');
+	const run = dims.half + dims.inner;
+	const margin = Math.max(BLOCKER_BACK_MARGIN, run * (Math.abs(sz) / -sx) + BLOCKER_DRIFT_SLACK);
+	const top = Math.max(BLOCKER_TOP, dims.wallHeight + WALL_CAP_THICKNESS + run * (sy / -sx) + BLOCKER_RISE_SLACK);
+	return sunBlockerBox(dims, margin, top);
 }
 
 /** Height of the light cap on each wall top. */
