@@ -164,7 +164,142 @@
       "objects": []
     },
     "chinara": {
-      "objects": []
+      "objects": [
+        {
+          "id": "table-xwfubs",
+          "type": "table",
+          "position": [
+            -2.6,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            90,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "id": "chair-vwf4in",
+          "type": "chair",
+          "position": [
+            -1.75,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            -90,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "id": "shelf-qrchw2",
+          "type": "shelf",
+          "position": [
+            2.25,
+            0,
+            -2.75
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "id": "bed-zig539",
+          "type": "bed",
+          "position": [
+            1,
+            0,
+            -1.75
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ],
+          "color": "#ffdbf5"
+        },
+        {
+          "id": "lamp-k6x3n7",
+          "type": "lamp",
+          "position": [
+            -0.25,
+            0,
+            -2.5
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "id": "plant-x7z35v",
+          "type": "plant",
+          "position": [
+            -2.64,
+            0,
+            -1.5
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "id": "rug-nps9rl",
+          "type": "rug",
+          "position": [
+            0,
+            0,
+            -0.25
+          ],
+          "rotation": [
+            0,
+            -15,
+            0
+          ],
+          "scale": [
+            2.3,
+            1,
+            2.4
+          ]
+        }
+      ]
     },
     "alibala": {
       "objects": []
