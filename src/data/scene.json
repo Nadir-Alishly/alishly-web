@@ -1,5 +1,29 @@
 {
   "version": 1,
+  "settings": {
+    "floor": {
+      "tile": 2
+    },
+    "wall": {
+      "tile": 5
+    },
+    "sun": {
+      "intensity": 10,
+      "azimuth": 2.7842,
+      "elevation": 27.0544,
+      "shadowRadius": 4.4
+    },
+    "glow": {
+      "color": "#ffdeb3",
+      "haloOpacity": 0.4,
+      "haloSpread": 0.8
+    },
+    "key": {
+      "color": "#ffe9c7",
+      "azimuth": 26.0333,
+      "elevation": 61.1668
+    }
+  },
   "rooms": {
     "elnur": {
       "objects": [
