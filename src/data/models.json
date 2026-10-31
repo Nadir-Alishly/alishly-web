@@ -1,1 +1,8 @@
-[]
+[
+	{
+		"id": "tall-house-plant",
+		"label": "tall house plant",
+		"file": "/models/tall-house-plant.glb",
+		"defaultScale": 0.01
+	}
+]
