@@ -2,7 +2,7 @@
 // Everything user-visible that comes from GitHub or from the token goes through textContent only.
 import { LIMITS, parseScene, serializeScene, validateScene } from '../../data/scene';
 import type { ParseOptions, SceneData, SceneObject, Vec3 } from '../../data/scene';
-import { CATALOG, catalogEntry } from '../room-objects';
+import { catalogEntry } from '../room-objects';
 import { createEditor } from './editor';
 import type { ChangeReason, Editor, RoomInfo, TransformMode } from './editor';
 import {
@@ -17,6 +17,8 @@ import {
 	validateTarget,
 } from './github';
 import type { GithubTarget, StorageLike } from './github';
+import { mountModelLibrary } from './model-library';
+import type { ModelLibrary } from './model-library';
 import { mountSettingsPanel } from './settings-panel';
 import type { SettingsPanel } from './settings-panel';
 
@@ -47,7 +49,6 @@ export function mountAdmin(root: HTMLElement) {
 	const rooms = JSON.parse(root.dataset.rooms ?? '[]') as RoomInfo[];
 	// No `modelIds` on purpose: objects of an unknown model are kept (and written back by Save), not dropped.
 	const parseOptions: ParseOptions = { slugs: rooms.map((r) => r.slug) };
-	const knownTypes = new Set(CATALOG.map((entry) => entry.type));
 	const bundled = parseScene(JSON.parse(root.dataset.bundled ?? '{}'), parseOptions);
 
 	const session = storage('sessionStorage');
@@ -97,6 +98,7 @@ export function mountAdmin(root: HTMLElement) {
 
 	// --- State --------------------------------------------------------------------------------
 	let editor: Editor | null = null;
+	let library: ModelLibrary | null = null;
 	/** The serialized scene that GitHub (or the bundled copy, before any load) is known to hold. */
 	let baseline = serializeScene(bundled.scene);
 	/** Blob sha of the file on GitHub; null until it was loaded or saved once. */
@@ -126,7 +128,7 @@ export function mountAdmin(root: HTMLElement) {
 		for (const [slug, room] of Object.entries(scene.rooms)) {
 			const counts = new Map<string, number>();
 			for (const object of room.objects) {
-				if (!knownTypes.has(object.type)) counts.set(object.type, (counts.get(object.type) ?? 0) + 1);
+				if (!catalogEntry(object.type)) counts.set(object.type, (counts.get(object.type) ?? 0) + 1);
 			}
 			for (const [type, n] of counts) {
 				notes.push(`room "${slug}": ${n} object(s) of unknown type "${type}" kept but not shown (they are saved unchanged).`);
@@ -144,6 +146,7 @@ export function mountAdmin(root: HTMLElement) {
 		reloadButton.disabled = busy;
 		overwriteButton.disabled = busy;
 		saveButton.setAttribute('aria-busy', String(busy));
+		library?.refresh();
 	};
 	const refreshDirty = () => {
 		dirty = !!editor && serializeScene(editor.getScene()) !== baseline;
@@ -241,19 +244,41 @@ export function mountAdmin(root: HTMLElement) {
 		initial: bundled.scene.settings,
 		onChange: (next) => editor?.setSettings(next),
 	});
+	library = mountModelLibrary({
+		root,
+		roomNames: new Map(rooms.map((room) => [room.slug, `${room.name}'s room`])),
+		slugs: rooms.map((room) => room.slug),
+		getScene: () => editor?.getScene() ?? bundled.scene,
+		run: guarded,
+		isBusy: () => busy,
+		client: () => client(),
+		scenePath: () => readTarget().path,
+		onCatalogChange: () => {
+			renderCatalog();
+			refreshSelection();
+		},
+	});
+
 	wallInput.addEventListener('input', () => editor?.setWallColor(wallInput.value));
 	wallReset.addEventListener('click', () => editor?.setWallColor(null));
 
-	for (const entry of CATALOG) {
-		const button = document.createElement('button');
-		button.type = 'button';
-		button.dataset.addType = entry.type;
-		button.textContent = entry.label;
-		button.className =
-			'rounded-full px-3 py-1.5 text-sm font-medium text-stone-700 ring-1 ring-stone-300 outline-offset-2 hover:bg-stone-100 focus-visible:outline-2 focus-visible:outline-stone-900';
-		button.addEventListener('click', () => editor?.addObject(entry.type));
-		catalogBox.append(button);
-	}
+	/** (Re)builds the "Add to room" pills: the primitives and the models that are not queued for deletion. */
+	const renderCatalog = () => {
+		catalogBox.replaceChildren(
+			...(library?.catalog() ?? []).map((entry) => {
+				const button = document.createElement('button');
+				button.type = 'button';
+				button.dataset.addType = entry.type;
+				button.textContent = entry.label;
+				button.className =
+					'rounded-full px-3 py-1.5 text-sm font-medium text-stone-700 ring-1 ring-stone-300 outline-offset-2 hover:bg-stone-100 focus-visible:outline-2 focus-visible:outline-stone-900';
+				button.addEventListener('click', () => editor?.addObject(entry.type));
+				return button;
+			}),
+		);
+		refreshCatalog();
+	};
+	renderCatalog();
 
 	// A focused <select> swallows the W/E/R/Esc/Del hotkeys, so leave it after a mouse pick. A keyboard
 	// user stepping through the rooms with the arrow keys keeps focus (and so can keep stepping).
@@ -327,18 +352,28 @@ export function mountAdmin(root: HTMLElement) {
 		return createGithubClient({ token: readToken(), target: readTarget() });
 	};
 
-	/** Runs a request with the buttons locked and every failure turned into a status line. */
-	async function guarded(action: () => Promise<void>) {
+	/** Scene failures: a status line, plus Reload/Overwrite for a conflict. */
+	function reportSceneError(error: unknown) {
+		if (!(error instanceof GithubError)) console.error(error); // never carries the token
+		setStatus(describeError(error), 'error');
+		if (error instanceof GithubError && error.kind === 'conflict') showConflict(true);
+	}
+
+	/**
+	 * Runs a request with the buttons locked (scene Save and Save models share this lock, so they cannot
+	 * overlap) and every failure turned into a status line by `onError`.
+	 */
+	async function guarded(action: () => Promise<void>, onError: (error: unknown) => void = reportSceneError) {
 		if (busy) return;
 		busy = true;
-		showConflict(false);
+		if (onError === reportSceneError) showConflict(false);
+		// A library action replaces a stale "Save models first" line from a blocked scene Save (it is resolved by now).
+		else if (conflictBox.hidden && statusLine.textContent?.startsWith('Save models first')) setStatus('');
 		refreshButtons();
 		try {
 			await action();
 		} catch (error) {
-			if (!(error instanceof GithubError)) console.error(error); // never carries the token
-			setStatus(describeError(error), 'error');
-			if (error instanceof GithubError && error.kind === 'conflict') showConflict(true);
+			onError(error);
 		} finally {
 			busy = false;
 			refreshButtons();
@@ -374,6 +409,7 @@ export function mountAdmin(root: HTMLElement) {
 		refreshDirty();
 		showWarnings([...remote.warnings, ...keptNotes(remote.scene)]);
 		setStatus('Loaded the latest scene from GitHub.', 'success');
+		library?.checkRemovals();
 	}
 
 	// Loading replaces unsaved edits, so a click on "Load latest" with edits needs a second click.
@@ -395,7 +431,13 @@ export function mountAdmin(root: HTMLElement) {
 	reloadButton.addEventListener('click', () => void guarded(load));
 
 	async function save(overwrite: boolean) {
-		const text = serializeScene(editor?.getScene() ?? bundled.scene);
+		const scene = editor?.getScene() ?? bundled.scene;
+		// The site is built from the repository: an object of a model that is not committed yet would show a broken box.
+		const unsaved = library?.pendingUsedBy(scene) ?? [];
+		if (unsaved.length > 0) {
+			throw new GithubError('invalid-config', `Save models first: ${unsaved.join(', ')}. The scene uses models that are not on GitHub yet.`);
+		}
+		const text = serializeScene(scene);
 		const problems = validateScene(JSON.parse(text), parseOptions);
 		if (problems.length) {
 			showWarnings(problems);
@@ -444,7 +486,7 @@ export function mountAdmin(root: HTMLElement) {
 
 	// --- Leaving the page ---------------------------------------------------------------------------
 	window.addEventListener('beforeunload', (event: BeforeUnloadEvent) => {
-		if (!dirty) return;
+		if (!dirty && !library?.hasPending()) return;
 		event.preventDefault();
 		event.returnValue = ''; // required by some browsers to show the prompt
 	});

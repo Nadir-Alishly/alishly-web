@@ -7,7 +7,7 @@ import {
 } from '../src/data/scene.ts';
 
 const SLUGS = ['elnur', 'sabina', 'nadir', 'chinara', 'alibala', 'elkhan', 'fazil'];
-const MODELS = ['test-crate'];
+const MODELS = ['crate'];
 const opts = { slugs: SLUGS, modelIds: MODELS };
 
 const obj = (over: Record<string, unknown> = {}) => ({
@@ -50,7 +50,7 @@ test('color is optional', () => {
 });
 
 test('every primitive type and model:<id> is accepted', () => {
-	const objects = [...PRIMITIVE_TYPES.map((t, i) => obj({ id: `o${i}`, type: t })), obj({ id: 'm1', type: 'model:test-crate' })];
+	const objects = [...PRIMITIVE_TYPES.map((t, i) => obj({ id: `o${i}`, type: t })), obj({ id: 'm1', type: 'model:crate' })];
 	const r = parseScene(scene({ elnur: roomOf(objects) }), opts);
 	assert.deepEqual(r.warnings, []);
 	assert.equal(r.scene.rooms.elnur.objects.length, PRIMITIVE_TYPES.length + 1);
@@ -211,9 +211,9 @@ test('cloneScene is deep', () => {
 
 test('helpers: isPrimitiveType / modelIdOf', () => {
 	assert.equal(isPrimitiveType('bed'), true);
-	assert.equal(isPrimitiveType('model:test-crate'), false);
+	assert.equal(isPrimitiveType('model:crate'), false);
 	assert.equal(isPrimitiveType('toString'), false);
-	assert.equal(modelIdOf('model:test-crate'), 'test-crate');
+	assert.equal(modelIdOf('model:crate'), 'crate');
 	assert.equal(modelIdOf('bed'), null);
 });
 
@@ -283,9 +283,9 @@ test('M1: a build that reads a broken scene.json falls back to empty rooms (the 
 });
 
 test('M1: parseModels keeps usable entries and never throws', () => {
-	const good = { id: 'test-crate', label: 'Test crate', file: '/models/test-crate.glb', defaultScale: 1 };
+	const good = { id: 'crate', label: 'Crate', file: '/models/crate.glb', defaultScale: 1 };
 	assert.deepEqual(parseModels([good]), [good]);
-	assert.deepEqual(parseModels([good, { ...good, id: 'two', label: 'Two', defaultScale: 0.5 }]).map((m) => m.id), ['test-crate', 'two']);
+	assert.deepEqual(parseModels([good, { ...good, id: 'two', label: 'Two', defaultScale: 0.5 }]).map((m) => m.id), ['crate', 'two']);
 	for (const input of [null, undefined, 5, 'x', {}, { id: 'a' }, [], [null], [1, 'x', []], '[{"id":']) {
 		assert.deepEqual(parseModels(input), [], JSON.stringify(input));
 	}

@@ -1,17 +1,22 @@
 // Furniture for the rooms: the catalog (low-poly primitives + GLTF models) and the manager that turns
 // scene.json objects into three.js objects inside a room.
 //
-// Adding a GLTF model: drop the .glb into public/models/ and add one entry to src/data/models.json:
+// Adding a GLTF model: import it in /admin ("Model library": a .glb, or a .gltf with its files, up to
+// 10 MB), place it, then "Save models" commits public/models/<id>.glb plus one entry in
+// src/data/models.json:
 //   { "id": "sofa", "label": "Sofa", "file": "/models/sofa.glb", "defaultScale": 1 }
-// It then shows up in /admin and can be placed (type "model:sofa"). Models are re-centred on x/z and
-// rest on y = 0 whatever their file's origin is; `defaultScale` is applied inside, so an object's own
-// scale of [1,1,1] always means "as listed". Static meshes only (no skins/animations).
+// (Both can also be written by hand.) The model can then be placed (type "model:sofa") and appears on
+// the site after the next build. Models are re-centred on x/z and rest on y = 0 whatever their file's
+// origin is; `defaultScale` is applied inside, so an object's own scale of [1,1,1] always means "as
+// listed". Static meshes only (no skins/animations).
+// The model list is fixed at build time; only the admin changes it at runtime (admin/model-registry.ts,
+// through addModelEntry / removeModelEntry; models imported on the page that are not deployed yet are read from memory).
 // GLTFLoader is imported lazily, so rooms without models never download it.
 import { BoxGeometry, Box3, Color, CylinderGeometry, Group, MathUtils, Mesh, MeshLambertMaterial } from 'three';
 import type { Material, Object3D, Raycaster } from 'three';
 import { models } from '../data/models';
 import { MODEL_PREFIX, PRIMITIVE_TYPES, isPrimitiveType, modelIdOf } from '../data/scene';
-import type { PrimitiveType, SceneObject, Vec3 } from '../data/scene';
+import type { ModelEntry, PrimitiveType, SceneObject, Vec3 } from '../data/scene';
 
 export interface CatalogEntry {
 	/** The value stored in scene.json: a primitive name or `model:<id>`. */
@@ -134,18 +139,28 @@ export const PRIMITIVE_CATALOG: readonly CatalogEntry[] = PRIMITIVE_TYPES.map((t
 	defaultScale: 1,
 }));
 
-export const MODEL_CATALOG: readonly CatalogEntry[] = models.map((model) => ({
+// The known models: the build-time list, plus whatever the admin registers while it is open.
+const library = new Map<string, ModelEntry>(models.map((model) => [model.id, model]));
+
+const modelCatalogEntry = (model: ModelEntry): CatalogEntry => ({
 	type: MODEL_PREFIX + model.id,
 	label: model.label,
 	kind: 'model',
 	defaultColor: null,
 	defaultScale: model.defaultScale,
-}));
+});
 
-export const CATALOG: readonly CatalogEntry[] = [...PRIMITIVE_CATALOG, ...MODEL_CATALOG];
+/** The primitives followed by the models, as of now. */
+export function getCatalog(): readonly CatalogEntry[] {
+	return [...PRIMITIVE_CATALOG, ...[...library.values()].map(modelCatalogEntry)];
+}
 
 export function catalogEntry(type: string): CatalogEntry | undefined {
-	return CATALOG.find((entry) => entry.type === type);
+	const primitive = PRIMITIVE_CATALOG.find((entry) => entry.type === type);
+	if (primitive) return primitive;
+	const modelId = modelIdOf(type);
+	const model = modelId === null ? undefined : library.get(modelId);
+	return model ? modelCatalogEntry(model) : undefined;
 }
 
 /** A fresh scene object for the catalog entry, at `position`. */
@@ -194,16 +209,23 @@ function setPrimitiveColor(group: Object3D, hex: string) {
 // and own their (cloned) materials. Failed loads are dropped from the cache so they can be retried.
 const templates = new Map<string, Promise<Object3D>>();
 
+// Models added while the admin is open load through their own function (they are read from memory).
+const loaders = new Map<string, () => Promise<Object3D>>();
+
 function loadTemplate(modelId: string): Promise<Object3D> {
 	const cached = templates.get(modelId);
 	if (cached) return cached;
-	const entry = models.find((model) => model.id === modelId);
+	const entry = library.get(modelId);
 	const promise = (async () => {
 		if (!entry) throw new Error(`Unknown model "${modelId}"`);
-		const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
-		const gltf = await new GLTFLoader().loadAsync(entry.file);
+		const custom = loaders.get(modelId);
+		let content: Object3D;
+		if (custom) content = await custom();
+		else {
+			const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+			content = (await new GLTFLoader().loadAsync(entry.file)).scene;
+		}
 		// Re-centre on x/z and rest on y = 0, so models behave like the primitives.
-		const content = gltf.scene;
 		const bounds = new Box3().setFromObject(content);
 		content.position.x -= (bounds.min.x + bounds.max.x) / 2;
 		content.position.z -= (bounds.min.z + bounds.max.z) / 2;
@@ -215,6 +237,26 @@ function loadTemplate(modelId: string): Promise<Object3D> {
 	templates.set(modelId, promise);
 	promise.catch(() => templates.delete(modelId));
 	return promise;
+}
+
+/** Admin hook: adds a model to the catalog; `load` yields its scene instead of fetching `entry.file`. Throws if the id is taken. */
+export function addModelEntry(entry: ModelEntry, load: () => Promise<Object3D>): void {
+	if (library.has(entry.id)) throw new Error(`Model "${entry.id}" already exists.`);
+	library.set(entry.id, { ...entry });
+	loaders.set(entry.id, load);
+}
+
+/**
+ * Admin hook: removes a model from the catalog and forgets its loaded template. Returns that template
+ * (if it was loaded) so the caller can dispose it. Objects of the model that are still in a scene stop
+ * being shown (the admin refuses to do this while any exist).
+ */
+export function removeModelEntry(id: string): Promise<Object3D> | undefined {
+	library.delete(id);
+	loaders.delete(id);
+	const template = templates.get(id);
+	templates.delete(id);
+	return template;
 }
 
 function instantiateModel(template: Object3D, defaultScale: number): Group {
@@ -342,7 +384,7 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 		if (modelId === null) {
 			if (isPrimitiveType(object.type)) holder.add(...buildPrimitive(object.type).children);
 		} else {
-			const defaultScale = models.find((model) => model.id === modelId)?.defaultScale ?? 1;
+			const defaultScale = library.get(modelId)?.defaultScale ?? 1;
 			loadTemplate(modelId).then(
 				(template) => {
 					if (disposed || holders.get(object.id) !== holder) return; // removed meanwhile

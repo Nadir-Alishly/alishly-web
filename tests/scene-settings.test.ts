@@ -16,7 +16,7 @@ import { family } from '../src/data/family.ts';
 import { floorOf } from '../src/data/room-palette.ts';
 
 const SLUGS = family.map((m) => m.slug);
-const opts = { slugs: SLUGS, modelIds: ['test-crate'] };
+const opts = { slugs: SLUGS, modelIds: ['crate'] };
 type Flat = Record<string, Record<string, number | string>>;
 const flat = (s: unknown) => s as Flat;
 const numericKeys = (): [string, string][] =>

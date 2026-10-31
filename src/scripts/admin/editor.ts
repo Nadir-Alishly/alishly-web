@@ -109,6 +109,8 @@ const AXES = [0, 1, 2] as const;
 const isTyping = (target: EventTarget | null) => {
 	if (!(target instanceof HTMLElement)) return false;
 	if (target.isContentEditable) return true;
+	// Panels that own the keyboard (the model library, whose buttons would otherwise let Del/Backspace reach the scene).
+	if (target.closest('[data-no-shortcuts]')) return true;
 	if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;
 	if (target instanceof HTMLInputElement) {
 		// A focused slider counts as typing too: its arrow keys are its own, and Delete/W/E/R must not reach the scene.

@@ -72,6 +72,55 @@ const transformFields = [
 				<div id="catalog" class="flex flex-wrap gap-2"></div>
 			</section>
 
+			<section
+				id="library-section"
+				aria-labelledby="library-heading"
+				data-no-shortcuts
+				class="space-y-3"
+			>
+				<h2 id="library-heading" class={heading}>Model library</h2>
+				<div>
+					<label for="lib-file" class={label}>
+						Import a .glb, or a .gltf together with its .bin and texture files (max 10 MB)
+					</label>
+					<input
+						type="file"
+						id="lib-file"
+						multiple
+						accept=".glb,.gltf,.bin,image/png,image/jpeg,image/webp"
+						class="mt-1 block w-full text-sm text-stone-600 file:mr-3 file:cursor-pointer file:rounded-full file:border-0 file:bg-stone-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-stone-700 hover:file:bg-stone-200 disabled:opacity-40"
+					/>
+				</div>
+				<div id="lib-form" hidden class="space-y-2 rounded-lg bg-stone-50 p-3">
+					<p id="lib-form-info" class="text-xs text-stone-500"></p>
+					<div class="grid grid-cols-[1fr_5.5rem] gap-2">
+						<div>
+							<label for="lib-name" class={label}>Name</label>
+							<input id="lib-name" maxlength="60" autocomplete="off" class={field} />
+						</div>
+						<div>
+							<label for="lib-scale" class={label}>Scale</label>
+							<input id="lib-scale" type="number" step="0.01" min="0.01" max="50" class={field} />
+						</div>
+					</div>
+					<div class="flex gap-2">
+						<button type="button" id="lib-add" class={solid}>Add</button>
+						<button type="button" id="lib-cancel" class={quiet}>Cancel</button>
+					</div>
+				</div>
+				<p id="lib-empty" class="text-sm text-stone-500">No models yet.</p>
+				<ul id="lib-list" class="space-y-1.5"></ul>
+				<button type="button" id="lib-save" class={`${quiet} w-full`}>Save models</button>
+				<p
+					id="lib-status"
+					role="status"
+					aria-live="polite"
+					data-kind="info"
+					class="text-sm text-stone-600 data-[kind=error]:text-red-700 data-[kind=success]:text-green-800"
+				>
+				</p>
+			</section>
+
 			<section aria-labelledby="tools-heading" class="space-y-3">
 				<h2 id="tools-heading" class={heading}>Move, rotate, scale</h2>
 				<div class="flex gap-2" role="group" aria-label="Transform mode">

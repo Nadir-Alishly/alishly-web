@@ -209,13 +209,54 @@ for (const [slug] of members) {
   check(modelsJson.every((m) => existsSync(join(dist, m.file))), 'every models.json file exists in dist');
 }
 
-// GLB test model
+// GLBs of the model library: every models.json entry must be a self-contained binary glTF 2.0 (0 iterations when empty)
 {
-  const glb = existsSync(join(dist, 'models/test-crate.glb')) ? readFileSync(join(dist, 'models/test-crate.glb')) : null;
-  check(!!glb, 'dist/models/test-crate.glb exists');
-  check(!!glb && glb.subarray(0, 4).toString('latin1') === 'glTF', 'test-crate.glb starts with magic "glTF"');
-  check(!!glb && glb.readUInt32LE(4) === 2, 'test-crate.glb is glTF version 2');
-  check(!!glb && glb.readUInt32LE(8) === glb.length, 'test-crate.glb header length equals file size');
+  const modelsJson = JSON.parse(readFileSync(new URL('../src/data/models.json', import.meta.url), 'utf8'));
+  check(!existsSync(join(dist, 'models/test-crate.glb')), 'the removed test-crate.glb is not in dist');
+  for (const m of modelsJson) {
+    const path = join(dist, m.file);
+    const glb = existsSync(path) ? readFileSync(path) : null;
+    check(!!glb, `dist${m.file} exists (model ${m.id})`);
+    check(!!glb && glb.subarray(0, 4).toString('latin1') === 'glTF', `${m.id}: starts with magic "glTF"`);
+    check(!!glb && glb.readUInt32LE(4) === 2, `${m.id}: glTF version 2`);
+    check(!!glb && glb.readUInt32LE(8) === glb.length, `${m.id}: header length equals file size`);
+    check(m.file === `/models/${m.id}.glb`, `${m.id}: file path is /models/<id>.glb`);
+    check(!!glb && glb.length <= 10 * 1024 * 1024, `${m.id}: at most 10 MB`);
+  }
+}
+
+// No public bundle may contain the admin-only model registry / editor code. The files each public page loads are collected
+// from its <script src> / modulepreload URLs and followed through their static imports (shared chunks like room-core).
+{
+  const ADMIN_ONLY = ['no visible geometry', 'parseAsync', 'registerModel', 'inspectModel', 'TransformControls', 'git/blobs'];
+  const pages = ['index.html', ...readdirSync(join(dist, 'rooms')).map((r) => `rooms/${r}/index.html`)];
+  const seen = new Set();
+  const visit = (file) => {
+    if (seen.has(file) || !existsSync(join(dist, file))) return;
+    seen.add(file);
+    for (const m of read(file).matchAll(/(?:from|import)\s*["']\.\/([^"']+\.js)["']/g)) visit(`_astro/${m[1]}`);
+  };
+  for (const page of pages) {
+    for (const m of read(page).matchAll(/\/_astro\/([^"'\s]+\.js)/g)) visit(`_astro/${m[1]}`);
+  }
+  check(seen.size >= 3, `public bundle walk found ${seen.size} JS files from ${pages.length} pages (expects the picker script, the room script and the shared room-core chunk)`);
+  check([...seen].some((f) => /room-core/.test(f)), 'public bundle walk reaches the shared room-core chunk');
+  for (const f of seen) {
+    const src = read(f);
+    const found = ADMIN_ONLY.filter((str) => src.includes(str));
+    check(found.length === 0, `public bundle ${f} has no admin-only code${found.length ? ` (found: ${found.join(', ')})` : ''}`);
+  }
+  // control: the strings are real, i.e. they DO exist in the admin bundle graph (so the check above cannot pass by accident)
+  const adminSeen = new Set();
+  const visitAdmin = (file) => {
+    if (adminSeen.has(file) || !existsSync(join(dist, file))) return;
+    adminSeen.add(file);
+    for (const m of read(file).matchAll(/(?:from|import)\s*["']\.\/([^"']+\.js)["']/g)) visitAdmin(`_astro/${m[1]}`);
+  };
+  for (const m of read('admin/index.html').matchAll(/\/_astro\/([^"'\s]+\.js)/g)) visitAdmin(`_astro/${m[1]}`);
+  const adminSrc = [...adminSeen].map(read).join('\n');
+  check(adminSrc.includes('no visible geometry') && adminSrc.includes('parseAsync'), 'control: the admin bundle graph does contain the model registry strings');
+  check([...adminSeen].some((f) => !seen.has(f)), 'control: the admin loads scripts the public pages do not');
 }
 
 // /admin page
