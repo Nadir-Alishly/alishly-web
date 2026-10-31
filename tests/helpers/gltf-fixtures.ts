@@ -310,10 +310,10 @@ export function makeExternalHttpsUriGltf(): string {
 }
 
 /**
- * A structurally valid GLB padded so the total size exceeds `minBytes` (default 10 MiB + 1 MiB).
+ * A structurally valid GLB padded so the total size exceeds `minBytes` (default 25 MiB + 1 MiB).
  * The padding is zeros in the BIN chunk and the buffer's byteLength is updated to match.
  */
-export function makeOversizedGlb(minBytes = 11 * MIB): Uint8Array {
+export function makeOversizedGlb(minBytes = 26 * MIB): Uint8Array {
 	const small = boxGltf();
 	const probe = encodeGlb(small.json, small.bin).length;
 	const extra = Math.max(0, minBytes - probe) + 4;

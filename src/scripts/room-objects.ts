@@ -2,7 +2,7 @@
 // scene.json objects into three.js objects inside a room.
 //
 // Adding a GLTF model: import it in /admin ("Model library": a .glb, or a .gltf with its files, up to
-// 10 MB), place it, then "Save models" commits public/models/<id>.glb plus one entry in
+// 25 MB), place it, then "Save models" commits public/models/<id>.glb plus one entry in
 // src/data/models.json:
 //   { "id": "sofa", "label": "Sofa", "file": "/models/sofa.glb", "defaultScale": 1 }
 // (Both can also be written by hand.) The model can then be placed (type "model:sofa") and appears on

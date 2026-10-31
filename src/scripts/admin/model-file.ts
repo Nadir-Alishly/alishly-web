@@ -4,7 +4,7 @@
 import { LIMITS } from '../../data/scene.ts';
 
 /** Size cap of the final GLB. */
-export const MAX_MODEL_BYTES = 10 * 1024 * 1024;
+export const MAX_MODEL_BYTES = 25 * 1024 * 1024;
 export const MAX_LABEL_LENGTH = 60;
 
 /** The message of a ModelFileError is meant to be shown to the user as is. */

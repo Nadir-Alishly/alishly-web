@@ -121,14 +121,16 @@ test('validateGlb rejects external uris: https, data: and relative in buffers an
 });
 
 test('validateGlb enforces the size cap first (before parsing anything)', () => {
-	assert.equal(MAX_MODEL_BYTES, 10 * 1024 * 1024);
+	assert.equal(MAX_MODEL_BYTES, 25 * 1024 * 1024);
+	assert.equal(MAX_MODEL_BYTES, 26_214_400, 'the cap is 25 MiB = 26,214,400 bytes');
+	assert.ok(F.makeOversizedGlb().length > MAX_MODEL_BYTES, 'the oversized fixture exceeds 25 MiB');
 	rejects(() => validateGlb(F.makeOversizedGlb()), /limit|MB/i);
 	rejects(() => validateGlb(new Uint8Array(MAX_MODEL_BYTES + 1)), /MB/);
 });
 
-test('size cap boundary: exactly 10 MiB passes assertWithinCap, one byte more does not', () => {
+test('size cap boundary: exactly 25 MiB passes assertWithinCap, one byte more does not', () => {
 	assert.doesNotThrow(() => assertWithinCap(MAX_MODEL_BYTES));
-	rejects(() => assertWithinCap(MAX_MODEL_BYTES + 1), /10\.0 MB/);
+	rejects(() => assertWithinCap(MAX_MODEL_BYTES + 1), /25\.0 MB/);
 	// A real GLB sized to exactly the cap validates; 4 bytes (one aligned unit) beyond is refused.
 	const build = (extra: number) => {
 		const { json, bin } = F.boxGltf({ extraBufferBytes: extra });
@@ -142,10 +144,13 @@ test('size cap boundary: exactly 10 MiB passes assertWithinCap, one byte more do
 	};
 	const exact = sized(MAX_MODEL_BYTES);
 	assert.equal(exact.length, MAX_MODEL_BYTES);
-	assert.doesNotThrow(() => validateGlb(exact), 'a GLB of exactly 10 MiB is accepted');
+	assert.doesNotThrow(() => validateGlb(exact), 'a GLB of exactly 25 MiB (26,214,400 B) is accepted');
 	const over = sized(MAX_MODEL_BYTES + 4);
 	assert.equal(over.length, MAX_MODEL_BYTES + 4);
-	rejects(() => validateGlb(over), /MB/);
+	assert.equal(over.length, 26_214_404, 'the next 4-byte-aligned size above the cap');
+	rejects(() => validateGlb(over), /25\.0 MB/);
+	rejects(() => validateGlb(new Uint8Array(MAX_MODEL_BYTES + 1)), /25\.0 MB/);
+	assert.ok(!/10\.0 MB/.test((() => { try { validateGlb(over); } catch (e) { return (e as Error).message; } return ''; })()), 'no leftover 10 MB text');
 });
 
 test('every ModelFileError message is a short user-facing sentence (no stack text, no token-like content)', () => {
@@ -506,4 +511,10 @@ test('labelFromFilename (n5): clipping never cuts an emoji (surrogate pair) in h
 test('slugId (n2): accents are folded (combining marks removed), not turned into dashes', () => {
 	assert.equal(slugId('Crème Brûlée Ñandú', []), 'creme-brulee-nandu');
 	assert.equal(slugId('e\u0301cole', []), 'ecole');
+});
+
+test('model-limits: suggestedScale reaches 0.001 for huge models and never goes below it', () => {
+	assert.equal(suggestedScale([1000, 1, 1]), 0.001);
+	assert.equal(suggestedScale([500, 1, 1]), 0.002);
+	assert.equal(suggestedScale([100000, 1, 1]), 0.001);
 });

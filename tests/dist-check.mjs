@@ -221,7 +221,7 @@ for (const [slug] of members) {
     check(!!glb && glb.readUInt32LE(4) === 2, `${m.id}: glTF version 2`);
     check(!!glb && glb.readUInt32LE(8) === glb.length, `${m.id}: header length equals file size`);
     check(m.file === `/models/${m.id}.glb`, `${m.id}: file path is /models/<id>.glb`);
-    check(!!glb && glb.length <= 10 * 1024 * 1024, `${m.id}: at most 10 MB`);
+    check(!!glb && glb.length <= 25 * 1024 * 1024, `${m.id}: at most 25 MB`);
   }
 }
 
@@ -295,6 +295,14 @@ if (adminOk) {
   check(/autocomplete="new-password"/.test(tokenInput), 'admin: token input has autocomplete="new-password"');
   check(!/\bvalue=/.test(tokenInput), 'admin: token input has no pre-filled value');
   check(!/(?:github_pat_|ghp_)[A-Za-z0-9_]{6,}/.test(admin), 'admin: no token-looking string in page');
+  // model-limits: import scale field allows 0.001 and the size label says 25 MB (no stale 10 MB copy)
+  const libScale = admin.match(/<input\b[^>]*\bid="lib-scale"[^>]*>/)?.[0] ?? '';
+  check(!!libScale, 'admin: #lib-scale input exists');
+  check(/\bmin="0\.001"/.test(libScale), 'admin: #lib-scale has min="0.001"');
+  check(/\bstep="0\.001"/.test(libScale), 'admin: #lib-scale has step="0.001"');
+  check(/\bmax="50"/.test(libScale), 'admin: #lib-scale keeps max="50"');
+  check(/max 25 MB/.test(admin), 'admin: model library label says "max 25 MB"');
+  check(!/10 MB/.test(admin), 'admin: page contains no "10 MB"');
   // admin script bundle: editor code lives here
   const adminJs = scripts.map((m) => m[1].match(/src="([^"]+)"/)?.[1]).filter(Boolean);
   const bundle = adminJs.map((u) => readFileSync(join(dist, u), 'utf8')).join('\n');

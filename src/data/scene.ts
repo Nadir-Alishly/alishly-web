@@ -66,7 +66,7 @@ export const ROOM_BOUNDS = {
 export const LIMITS = {
 	maxObjectsPerRoom: 500,
 	maxPosition: 100,
-	minScale: 0.01,
+	minScale: 0.001,
 	maxScale: 50,
 	maxRotation: 36000,
 };

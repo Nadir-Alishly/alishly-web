@@ -313,3 +313,40 @@ test('M1: parseModels strips unknown keys; the shipped models.json passes throug
 	const shipped = JSON.parse(readFileSync(new URL('../src/data/models.json', import.meta.url), 'utf8'));
 	assert.deepEqual(parseModels(shipped), shipped, 'every shipped entry is valid (none silently skipped)');
 });
+
+// ---- model-limits: minScale 0.001 pinned with literal values -----------------------------------------
+
+test('model-limits: LIMITS.minScale is literally 0.001 (maxScale 50 unchanged)', () => {
+	assert.equal(LIMITS.minScale, 0.001);
+	assert.equal(LIMITS.maxScale, 50);
+});
+
+test('model-limits: parseScene keeps scale 0.001 and rejects 0.0009 like any below-min value', () => {
+	const kept = parseScene(scene({ elnur: roomOf([obj({ scale: [0.001, 0.001, 0.001] })]) }), opts);
+	assert.deepEqual(kept.warnings, []);
+	assert.deepEqual(kept.scene.rooms.elnur.objects[0].scale, [0.001, 0.001, 0.001]);
+	assert.deepEqual(validateScene(scene({ elnur: roomOf([obj({ scale: [0.001, 0.5, 50] })]) }), opts), []);
+	for (const bad of [[0.0009, 1, 1], [1, 0.0009, 1], [1, 1, 0.0009], [0, 1, 1], [-0.001, 1, 1]]) {
+		const r = parseScene(scene({ elnur: roomOf([obj({ scale: bad })]) }), opts);
+		assert.equal(r.scene.rooms.elnur.objects.length, 0, `scale ${JSON.stringify(bad)} drops the object like other out-of-range values`);
+		assert.ok(r.warnings.length > 0, JSON.stringify(bad));
+		assert.ok(validateScene(scene({ elnur: roomOf([obj({ scale: bad })]) }), opts).length > 0, JSON.stringify(bad));
+	}
+});
+
+test('model-limits: serializeScene(parseScene()) round-trips 0.001 and 0.0015', () => {
+	const r = parseScene(scene({ elnur: roomOf([obj({ scale: [0.001, 0.0015, 0.002] })]) }), opts);
+	const text = serializeScene(r.scene);
+	const again = parseScene(JSON.parse(text), opts);
+	assert.deepEqual(again.warnings, []);
+	assert.deepEqual(again.scene.rooms.elnur.objects[0].scale, [0.001, 0.0015, 0.002]);
+	assert.equal(text, serializeScene(again.scene), 'stable');
+});
+
+test('model-limits: parseModels keeps defaultScale 0.001 and drops 0.0009', () => {
+	const good = { id: 'tiny', label: 'Tiny', file: '/models/tiny.glb', defaultScale: 0.001 };
+	assert.deepEqual(parseModels([good]), [good]);
+	assert.deepEqual(parseModels([{ ...good, defaultScale: 0.0015 }]).map((m) => m.defaultScale), [0.0015]);
+	assert.deepEqual(parseModels([{ ...good, defaultScale: 0.0009 }]), []);
+	assert.deepEqual(parseModels([{ ...good, defaultScale: 0.0009 }, { ...good, id: 'ok' }]).map((m) => m.id), ['ok']);
+});
