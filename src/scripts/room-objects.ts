@@ -168,6 +168,25 @@ export function createObjectData(type: string, id: string, position: Vec3): Scen
 	return { id, type, position, rotation: [0, 0, 0], scale: [1, 1, 1] };
 }
 
+/**
+ * Local (unrotated) size of an object's content per unit of the object's own scale, i.e. the native
+ * bounding box x the model's defaultScale. Null while a model is loading, when it failed to load, or when
+ * the box is degenerate. The admin's size limits (data/object-size.ts) are the only reader.
+ */
+export function nativeSizeOf(holder: Object3D): Vec3 | null {
+	const size = holder.userData.nativeSize as Vec3 | undefined;
+	return size ?? null;
+}
+
+const boxSize = (box: Box3): Vec3 | null => {
+	if (box.isEmpty()) return null;
+	const size: Vec3 = [box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z];
+	return size.every((n) => Number.isFinite(n) && n > 0) ? size : null;
+};
+
+// Primitive sizes never change: measure each type once.
+const primitiveSizes = new Map<PrimitiveType, Vec3 | null>();
+
 function buildPrimitive(type: PrimitiveType): Group {
 	const group = new Group();
 	for (const part of PRIMITIVES[type].parts) {
@@ -232,6 +251,8 @@ function loadTemplate(modelId: string): Promise<Object3D> {
 		content.position.y -= bounds.min.y;
 		const wrapper = new Group();
 		wrapper.add(content);
+		const nativeSize = boxSize(bounds);
+		if (nativeSize) wrapper.userData.nativeSize = nativeSize;
 		return wrapper;
 	})();
 	templates.set(modelId, promise);
@@ -333,6 +354,11 @@ export interface ObjectManager {
 	update(object: SceneObject): void;
 	remove(id: string): void;
 	get(id: string): Object3D | undefined;
+	/**
+	 * Raise an object by `y` world units above where its data puts it (hover float); 0 = at rest. The offset
+	 * is remembered and re-applied by update(); remove()/replaceAll() forget it. Does not invalidate: the caller paints.
+	 */
+	setLift(id: string, y: number): void;
 	/** Id of the object the ray hits first, or null. */
 	idAt(raycaster: Raycaster): string | null;
 	dispose(): void;
@@ -345,6 +371,7 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 	const holders = new Map<string, Group>();
 	// The most recent data per object, so a late-finishing model load applies the current colour.
 	const latest = new Map<string, SceneObject>();
+	const lifts = new Map<string, number>();
 	const current = (id: string) => latest.get(id);
 
 	let signature: string | null = null;
@@ -362,6 +389,7 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 
 	const applyTransform = (holder: Group, object: SceneObject) => {
 		holder.position.set(...object.position);
+		holder.position.y += lifts.get(object.id) ?? 0;
 		holder.rotation.set(
 			MathUtils.degToRad(object.rotation[0]),
 			MathUtils.degToRad(object.rotation[1]),
@@ -382,13 +410,21 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 
 		const modelId = modelIdOf(object.type);
 		if (modelId === null) {
-			if (isPrimitiveType(object.type)) holder.add(...buildPrimitive(object.type).children);
+			if (isPrimitiveType(object.type)) {
+				const group = buildPrimitive(object.type);
+				if (!primitiveSizes.has(object.type)) primitiveSizes.set(object.type, boxSize(new Box3().setFromObject(group)));
+				const size = primitiveSizes.get(object.type);
+				if (size) holder.userData.nativeSize = size;
+				holder.add(...group.children);
+			}
 		} else {
 			const defaultScale = library.get(modelId)?.defaultScale ?? 1;
 			loadTemplate(modelId).then(
 				(template) => {
 					if (disposed || holders.get(object.id) !== holder) return; // removed meanwhile
 					holder.add(instantiateModel(template, defaultScale));
+					const nativeSize = template.userData.nativeSize as Vec3 | undefined;
+					if (nativeSize) holder.userData.nativeSize = nativeSize.map((n) => n * defaultScale);
 					applyColor(holder, current(object.id) ?? object);
 					holder.updateMatrixWorld(true);
 					onChange();
@@ -419,6 +455,7 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 		disposeInstance(holder);
 		holders.delete(id);
 		latest.delete(id);
+		lifts.delete(id);
 		onChange();
 	}
 
@@ -450,6 +487,15 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 		},
 		remove,
 		get: (id) => holders.get(id),
+		setLift(id, y) {
+			const holder = holders.get(id);
+			const object = latest.get(id);
+			if (!holder || !object) return;
+			if (y === 0) lifts.delete(id);
+			else lifts.set(id, y);
+			holder.position.y = object.position[1] + y;
+			holder.updateMatrixWorld(true);
+		},
 		idAt(raycaster) {
 			const hit = raycaster.intersectObjects(root.children, true)[0];
 			for (let node: Object3D | null = hit?.object ?? null; node; node = node.parent) {

@@ -84,20 +84,23 @@ export function buildModelCommit(args: {
 	roomNames?: ReadonlyMap<string, string>;
 	/** Ids of pending imports whose identical file is already on GitHub (see `findSavedImports`). */
 	savedIds?: ReadonlySet<string>;
+	/** Where the files live, for messages ("GitHub" or "disk"). */
+	where?: string;
 }): ModelCommit {
 	const { pending } = args;
+	const where = args.where ?? 'GitHub';
 
 	let rawModels: unknown;
 	try {
 		rawModels = JSON.parse(args.remoteModelsText);
 	} catch {
-		throw new GithubError('bad-response', 'models.json on GitHub is not valid JSON, so the library was not saved.');
+		throw new GithubError('bad-response', `models.json on ${where} is not valid JSON, so the library was not saved.`);
 	}
 	const remote = parseModels(rawModels);
 	if (!Array.isArray(rawModels) || remote.length !== rawModels.length) {
 		throw new GithubError(
 			'bad-response',
-			'models.json on GitHub has entries this page cannot read, so the library was not saved. Fix that file first.',
+			`models.json on ${where} has entries this page cannot read, so the library was not saved. Fix that file first.`,
 		);
 	}
 
@@ -105,11 +108,11 @@ export function buildModelCommit(args: {
 	try {
 		rawScene = JSON.parse(args.remoteSceneText);
 	} catch {
-		throw new GithubError('bad-response', 'The scene file on GitHub is not valid JSON, so the library was not saved.');
+		throw new GithubError('bad-response', `The scene file on ${where} is not valid JSON, so the library was not saved.`);
 	}
 	const scene = parseScene(rawScene, { slugs: args.slugs });
 	if (!scene.ok) {
-		throw new GithubError('bad-response', `The scene file on GitHub cannot be read, so the library was not saved: ${scene.warnings[0]}`);
+		throw new GithubError('bad-response', `The scene file on ${where} cannot be read, so the library was not saved: ${scene.warnings[0]}`);
 	}
 	for (const id of pending.removed) {
 		const usage = modelUsage(scene.scene, id);
@@ -117,7 +120,7 @@ export function buildModelCommit(args: {
 			const label = remote.find((entry) => entry.id === id)?.label ?? id;
 			throw new GithubError(
 				'rejected',
-				`"${label}" cannot be deleted: the scene on GitHub still uses it (${describeUsage(usage, args.roomNames)}). Remove those objects and save the scene first.`,
+				`"${label}" cannot be deleted: the scene on ${where} still uses it (${describeUsage(usage, args.roomNames)}). Remove those objects and save the scene first.`,
 			);
 		}
 	}
@@ -153,8 +156,8 @@ export function buildModelCommit(args: {
 			throw new GithubError(
 				'rejected',
 				sameEntry
-					? `The entry "${entry.id}" already exists on GitHub, but its file there is missing or not the same as this import. Remove the pending import and import it again under another name.`
-					: `A different model with the id "${entry.id}" now exists on GitHub. Remove the pending import and import it again under another name.`,
+					? `The entry "${entry.id}" already exists on ${where}, but its file there is missing or not the same as this import. Remove the pending import and import it again under another name.`
+					: `A different model with the id "${entry.id}" now exists on ${where}. Remove the pending import and import it again under another name.`,
 			);
 		}
 		next.push(canonical);
@@ -211,15 +214,17 @@ export async function saveModels(args: {
 	slugs: readonly string[];
 	pending: PendingModels;
 	roomNames?: ReadonlyMap<string, string>;
+	/** Where the files live, for messages ("GitHub" or "disk"). */
+	where?: string;
 }): Promise<SaveModelsResult> {
-	const { github, scenePath, slugs, pending, roomNames } = args;
+	const { github, scenePath, slugs, pending, roomNames, where } = args;
 	for (let attempt = 0; ; attempt++) {
 		try {
 			const head = await github.getHead();
 			const models = await github.getFileAt(MODELS_JSON_PATH, head);
 			const scene = await github.getFileAt(scenePath, head);
 			const savedIds = await findSavedImports(github, models.text, pending.added, head);
-			const commit = buildModelCommit({ remoteModelsText: models.text, remoteSceneText: scene.text, slugs, pending, roomNames, savedIds });
+			const commit = buildModelCommit({ remoteModelsText: models.text, remoteSceneText: scene.text, slugs, pending, roomNames, savedIds, where });
 			if (commit.changes.length === 0) return { commitSha: null, added: 0, removed: 0 };
 			const { commitSha } = await github.commitFiles({ message: commit.message, changes: commit.changes, expectedHead: head });
 			return { commitSha, added: commit.added, removed: commit.removed };

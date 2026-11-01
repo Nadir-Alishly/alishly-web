@@ -20,6 +20,8 @@ import {
 	suggestedScale,
 	validateGlb,
 } from './model-file';
+import { GITHUB_WORDING } from './backend';
+import type { Wording } from './backend';
 import { canonicalEntry, describeUsage, modelUsage, saveModels } from './model-ops';
 import type { PendingImport } from './model-ops';
 
@@ -41,6 +43,8 @@ export interface ModelLibraryOptions {
 	scenePath(): string;
 	/** The set of models changed (palette needs a rebuild). */
 	onCatalogChange(): void;
+	/** Where the models are saved, for messages; read at use time. Defaults to the GitHub wording. */
+	wording?(): Wording;
 }
 
 export interface ModelLibrary {
@@ -68,6 +72,7 @@ const toArrayBuffer = (bytes: Uint8Array): ArrayBuffer =>
 
 export function mountModelLibrary(options: ModelLibraryOptions): ModelLibrary {
 	const { root } = options;
+	const wording = () => options.wording?.() ?? GITHUB_WORDING;
 	const fileInput = byId<HTMLInputElement>(root, 'lib-file');
 	const form = byId(root, 'lib-form');
 	const formInfo = byId(root, 'lib-form-info');
@@ -324,7 +329,7 @@ export function mountModelLibrary(options: ModelLibraryOptions): ModelLibrary {
 		hideForm();
 		render();
 		options.onCatalogChange();
-		setStatus(`Added "${label}". Place it from "Add to room"; click Save models to publish it.`, 'success');
+		setStatus(wording().modelAdded(label), 'success');
 	}
 	addButton.addEventListener('click', add);
 	cancelButton.addEventListener('click', () => {
@@ -356,6 +361,7 @@ export function mountModelLibrary(options: ModelLibraryOptions): ModelLibrary {
 					slugs: options.slugs,
 					roomNames: options.roomNames,
 					pending: { added: [...pendingImports.values()], removed: [...pendingRemovals] },
+					where: wording().where,
 				});
 				// The committed models stay registered (read from memory until the page is reloaded after the rebuild).
 				pendingImports.clear();
@@ -364,14 +370,14 @@ export function mountModelLibrary(options: ModelLibraryOptions): ModelLibrary {
 				render();
 				options.onCatalogChange();
 				if (result.commitSha === null) {
-					setStatus('The model library on GitHub was already up to date. Nothing was committed.', 'success');
+					setStatus(wording().modelsUpToDate, 'success');
 					return;
 				}
 				const parts = [
 					result.added > 0 ? `${result.added} added` : '',
 					result.removed > 0 ? `${result.removed} deleted` : '',
 				].filter(Boolean);
-				setStatus(`Saved models${parts.length ? ` (${parts.join(', ')})` : ''}. Live after the site rebuilds (~1–2 min).`, 'success');
+				setStatus(wording().modelsSaved(parts.join(', ')), 'success');
 			},
 			(error) => {
 				if (!(error instanceof GithubError)) console.error(error); // never carries the token

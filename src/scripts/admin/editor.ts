@@ -9,11 +9,14 @@ import type { Object3D } from 'three';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import type { RoomColors } from '../../data/family';
 import { effectiveColors } from '../../data/effective-colors';
+import { clampObjectScale } from '../../data/object-size';
 import {
 	LIMITS,
 	ROOM_BOUNDS,
 	cloneScene,
 	modelIdOf,
+	normalizeNoteText,
+	restoreKeyOrder,
 	roundTo,
 	shiftIntoRange,
 } from '../../data/scene';
@@ -21,7 +24,7 @@ import type { SceneData, SceneObject, Vec3 } from '../../data/scene';
 import { COLOR_RE, parseSettings } from '../../data/scene-settings';
 import type { SceneSettings } from '../../data/scene-settings';
 import { createRoomCore } from '../room-core';
-import { catalogEntry, createObjectData } from '../room-objects';
+import { catalogEntry, createObjectData, nativeSizeOf } from '../room-objects';
 
 export type TransformMode = 'translate' | 'rotate' | 'scale';
 /**
@@ -42,6 +45,8 @@ export interface EditorOptions {
 	scene: SceneData;
 	/** Called after every change the UI may want to reflect. `edit`, `drag` and `scene` change the data. */
 	onChange?: (reason: ChangeReason) => void;
+	/** Called when the object size limits (data/object-size.ts) changed a scale; the UI shows a short hint. */
+	onSizeLimit?: () => void;
 }
 
 export interface Editor {
@@ -56,8 +61,17 @@ export interface Editor {
 	addObject(type: string): string | null;
 	duplicateSelected(): void;
 	deleteSelected(): void;
+	/**
+	 * Deletes one object of the current room, selected or not (same effects as deleteSelected). Objects that
+	 * are not shown (model missing from the catalog) are kept: they cannot be deleted from here.
+	 */
+	deleteObject(id: string): void;
 	select(id: string | null): void;
 	getSelected(): SceneObject | null;
+	/** Id of the selected object (cheaper than getSelected()). */
+	getSelectedId(): string | null;
+	/** The current room's objects in scene order, without cloning anything. `shown` is false for objects of an unknown model. */
+	getObjects(): { id: string; type: string; shown: boolean; hasNote: boolean }[];
 	getMode(): TransformMode;
 	setMode(mode: TransformMode): void;
 	getSnap(): boolean;
@@ -66,7 +80,16 @@ export interface Editor {
 	setBounds(on: boolean): void;
 	/** `null` goes back to the catalog default. */
 	setSelectedColor(hex: string | null): void;
-	/** Typed values are not snapped; they are kept inside the room when that option is on. */
+	/**
+	 * The selected object's note. Text is normalised like the file parser does (CRLF to LF, trimmed, cut at the limit);
+	 * an empty result removes the field. Emits `edit` only when the stored value changed.
+	 */
+	setSelectedTitle(text: string): void;
+	setSelectedParagraph(text: string): void;
+	/**
+	 * Typed values are not snapped; they are kept inside the room when that option is on. A scale that would make
+	 * the object smaller or bigger than the size limits is clamped (with Bounds on or off), not rejected.
+	 */
 	setSelectedTransform(patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }): void;
 	/** The global scene settings (a copy). */
 	getSettings(): SceneSettings;
@@ -148,6 +171,19 @@ export function createEditor(options: EditorOptions): Editor | null {
 	// data, so Save writes them back unchanged, but they have no 3D view and cannot be selected.
 	const shownObjects = () => roomObjects().filter((o) => catalogEntry(o.type) !== undefined);
 	const find = (id: string) => roomObjects().find((o) => o.id === id);
+	/** Sets/clears the selected object's title or paragraph (normalised, cut at `max`); emits `edit` if it changed. */
+	const setNoteField = (key: 'title' | 'paragraph', text: string, max: number) => {
+		const object = selected ? find(selected) : undefined;
+		if (!object) return;
+		let value = normalizeNoteText(String(text)).slice(0, max);
+		if (/[\ud800-\udbff]$/.test(value)) value = value.slice(0, -1); // never cut a surrogate pair in half
+		value = value.trim();
+		if ((object[key] ?? '') === value) return;
+		if (value === '') delete object[key];
+		else object[key] = value;
+		restoreKeyOrder(object);
+		emit('edit');
+	};
 	const describe = () =>
 		`Editable isometric view of ${info(room).name}'s room. Click an object to select it, drag the arrows to move it, drag empty space to rotate the view.`;
 	canvas.setAttribute('aria-label', describe());
@@ -193,6 +229,24 @@ export function createEditor(options: EditorOptions): Editor | null {
 			holder.position[key] += shiftIntoRange(box.min[key], box.max[key], ROOM_BOUNDS.min[axis], ROOM_BOUNDS.max[axis]);
 		}
 		holder.updateMatrixWorld(true);
+	};
+
+	/**
+	 * Keeps the object's world size inside the size limits: clamps the holder's scale (and the data's) when its
+	 * size is known, i.e. the model has loaded. `prev` is the scale before this edit; axes that did not change
+	 * are not inflated. Returns true (and calls `onSizeLimit`) when it changed something. Never called on
+	 * selection, so saved out-of-limit objects stay as they are until they are edited.
+	 */
+	const limitSize = (object: SceneObject, holder: Object3D, prev?: Vec3): boolean => {
+		const native = nativeSizeOf(holder);
+		if (!native) return false;
+		const { scale, clamped } = clampObjectScale(native, [holder.scale.x, holder.scale.y, holder.scale.z], prev);
+		if (!clamped) return false;
+		holder.scale.set(...scale);
+		holder.updateMatrixWorld(true);
+		object.scale = scale;
+		options.onSizeLimit?.();
+		return true;
 	};
 
 	/**
@@ -247,6 +301,7 @@ export function createEditor(options: EditorOptions): Editor | null {
 		const object = selected ? find(selected) : undefined;
 		const holder = selected ? objects.get(selected) : undefined;
 		if (!object || !holder) return;
+		limitSize(object, holder, object.scale); // the data still holds the scale before this pointer move
 		if (bounds) fitIntoRoom(holder);
 		readBack(object, holder);
 		updateHighlight();
@@ -264,10 +319,14 @@ export function createEditor(options: EditorOptions): Editor | null {
 	objects.onLoad = (id) => {
 		const object = find(id);
 		const holder = objects.get(id);
-		if (object && holder && pendingFit.delete(id) && bounds) {
-			fitIntoRoom(holder);
-			readBack(object, holder);
-			emit('edit');
+		if (object && holder && pendingFit.delete(id)) {
+			// A new or duplicated model: its size is known now, so apply the size limits and fit it into the room.
+			const sized = limitSize(object, holder);
+			if (bounds) fitIntoRoom(holder);
+			if (bounds || sized) {
+				readBack(object, holder);
+				emit('edit');
+			}
 		}
 		if (id === selected) updateHighlight();
 		core.invalidate();
@@ -319,10 +378,26 @@ export function createEditor(options: EditorOptions): Editor | null {
 	const insert = (object: SceneObject) => {
 		roomObjects().push(object);
 		const holder = objects.add(object);
+		if (modelIdOf(object.type) !== null) pendingFit.add(object.id);
+		// Select first: the UI clears its size hint on a selection change, and the limit below may set it.
+		select(object.id);
+		limitSize(object, holder); // primitives only: a model's size is not known until it has loaded
 		if (bounds) fitIntoRoom(holder);
 		readBack(object, holder);
-		if (modelIdOf(object.type) !== null) pendingFit.add(object.id);
-		select(object.id);
+		updateHighlight(); // the selection above saw the size before the clamp and the room fit
+		core.invalidate();
+		emit('edit');
+	};
+
+	/** Removes one object of the current room from the data and the view; a selected one is deselected first. */
+	const removeObject = (id: string) => {
+		if (selected === id) select(null);
+		const list = roomObjects();
+		const index = list.findIndex((o) => o.id === id);
+		if (index >= 0) list.splice(index, 1);
+		pendingFit.delete(id);
+		objects.remove(id);
+		core.invalidate();
 		emit('edit');
 	};
 
@@ -389,17 +464,22 @@ export function createEditor(options: EditorOptions): Editor | null {
 		},
 
 		deleteSelected() {
-			if (!selected) return;
-			const id = selected;
-			select(null);
-			const list = roomObjects();
-			const index = list.findIndex((o) => o.id === id);
-			if (index >= 0) list.splice(index, 1);
-			pendingFit.delete(id);
-			objects.remove(id);
-			core.invalidate();
-			emit('edit');
+			if (selected) removeObject(selected);
 		},
+
+		deleteObject(id) {
+			const object = find(id);
+			if (object && catalogEntry(object.type) !== undefined) removeObject(id);
+		},
+
+		getSelectedId: () => selected,
+		getObjects: () =>
+			roomObjects().map((o) => ({
+				id: o.id,
+				type: o.type,
+				shown: catalogEntry(o.type) !== undefined,
+				hasNote: typeof o.paragraph === 'string' && o.paragraph !== '',
+			})),
 
 		select,
 		getSelected: () => {
@@ -426,24 +506,35 @@ export function createEditor(options: EditorOptions): Editor | null {
 			if (hex === null) delete object.color;
 			else if (COLOR_RE.test(hex)) object.color = hex.toLowerCase();
 			else return;
+			restoreKeyOrder(object);
 			objects.update(object);
 			core.invalidate();
 			emit('edit');
 		},
 
+		setSelectedTitle: (text) => setNoteField('title', text, LIMITS.maxTitle),
+		setSelectedParagraph: (text) => setNoteField('paragraph', text, LIMITS.maxParagraph),
+
 		setSelectedTransform(patch) {
 			const object = selected ? find(selected) : undefined;
 			if (!object) return;
+			const prevScale: Vec3 = [...object.scale];
 			const finite = (v: Vec3 | undefined, ok: (n: number) => boolean) =>
 				v !== undefined && v.length === 3 && v.every((n) => Number.isFinite(n) && ok(n));
 			if (finite(patch.position, (n) => Math.abs(n) <= LIMITS.maxPosition)) object.position = [...patch.position!];
 			if (finite(patch.rotation, (n) => Math.abs(n) <= LIMITS.maxRotation)) object.rotation = [...patch.rotation!];
-			if (finite(patch.scale, (n) => n >= LIMITS.minScale && n <= LIMITS.maxScale)) object.scale = [...patch.scale!];
+			// Scale: any finite values are accepted and clamped (to the size limits, then to the multiplier range).
+			if (finite(patch.scale, () => true)) {
+				object.scale = patch.scale!.map((n) => Math.min(LIMITS.maxScale, Math.max(LIMITS.minScale, n))) as Vec3;
+			}
 			objects.update(object);
 			const holder = objects.get(object.id);
-			if (holder && bounds) {
-				fitIntoRoom(holder);
-				readBack(object, holder);
+			if (holder) {
+				limitSize(object, holder, prevScale); // with Bounds on or off
+				if (bounds) {
+					fitIntoRoom(holder);
+					readBack(object, holder);
+				}
 			}
 			updateHighlight();
 			core.invalidate();

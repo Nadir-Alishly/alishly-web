@@ -1,5 +1,6 @@
 import { createRoomCore } from './room-core';
 import type { RoomConfig } from './room-core';
+import { createRoomInteract } from './room-interact';
 
 export type { RoomConfig } from './room-core';
 
@@ -36,13 +37,19 @@ export function createRoomScene(canvas: HTMLCanvasElement, initial: RoomConfig):
 	const core = createRoomCore(canvas, initial);
 	if (!core) return createFallback(canvas, initial);
 	core.objects.setObjects(initial.objects ?? []);
+	// Hover/click notes on objects. Public only: the admin editor never creates this.
+	const interact = createRoomInteract(core, canvas);
+	interact.setObjects(initial.objects ?? []);
 
 	return {
 		setRoom(config) {
+			interact.clear(); // closes the popup and puts floated objects back, before the furniture is swapped
 			core.objects.setObjects(config.objects ?? []);
 			core.setRoom(config);
+			interact.setObjects(config.objects ?? []);
 		},
 		dispose() {
+			interact.dispose();
 			core.dispose();
 		},
 	};

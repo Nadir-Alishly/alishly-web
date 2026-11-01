@@ -15,6 +15,8 @@ const solid = `${button} bg-stone-900 text-white hover:bg-stone-700`;
 const field =
 	'w-full rounded-lg border border-stone-300 bg-white px-2.5 py-1.5 text-sm text-stone-900 outline-offset-2 focus-visible:outline-2 focus-visible:outline-stone-900';
 const label = 'block text-xs font-medium text-stone-500';
+const tabClass =
+	'rounded-full px-3 py-1.5 text-sm font-medium text-stone-600 outline-offset-2 hover:text-stone-900 focus-visible:outline-2 focus-visible:outline-stone-900 aria-selected:bg-white aria-selected:text-stone-900 aria-selected:shadow-sm';
 const heading = 'font-heading text-base font-semibold text-stone-900';
 
 const transformFields = [
@@ -28,33 +30,27 @@ const transformFields = [
 	<TexturePreload slot="head" />
 	<div
 		id="admin-root"
-		data-bundled={JSON.stringify(adminScene)}
+		data-bundled={JSON.stringify(adminScene).replace(/</g, '\\u003c')}
 		data-rooms={JSON.stringify(rooms)}
 		class="flex h-dvh"
 	>
 		<aside
 			aria-label="Editor"
-			class="w-96 shrink-0 space-y-6 overflow-y-auto border-r border-stone-200 bg-white p-5"
+			class="flex w-96 shrink-0 flex-col border-r border-stone-200 bg-white"
 		>
-			<header class="space-y-3">
+			<header class="shrink-0 space-y-3 border-b border-stone-200 p-5 pb-4">
 				<h1 class="font-heading text-2xl font-semibold">Scene admin</h1>
-				<div class="flex items-center gap-3">
-					<label for="room-select" class="sr-only">Room</label>
-					<select id="room-select" class={field}>
-						{rooms.map((room) => <option value={room.slug}>{room.name}'s room</option>)}
-					</select>
+				<div role="tablist" aria-label="Sidebar sections" class="grid grid-cols-3 gap-1 rounded-full bg-stone-100 p-1">
+					<button type="button" role="tab" id="tab-room" aria-controls="panel-room" aria-selected="true" tabindex="0" class={tabClass}>This room</button>
+					<button type="button" role="tab" id="tab-all" aria-controls="panel-all" aria-selected="false" tabindex="-1" class={tabClass}>All rooms</button>
+					<button type="button" role="tab" id="tab-save" aria-controls="panel-save" aria-selected="false" tabindex="-1" class={tabClass}
+						>Save<span id="tab-save-flag" hidden
+							><span aria-hidden="true" class="ml-1.5 inline-block size-2 rounded-full bg-red-600 align-middle"></span
+							><span class="sr-only"> (needs attention)</span></span
+						></button
+					>
 				</div>
-				<div class="flex items-end gap-2">
-					<div>
-						<label for="room-wall-color" class={label}>Wall colour of this room</label>
-						<input
-							type="color"
-							id="room-wall-color"
-							class="h-9 w-14 cursor-pointer rounded-lg border border-stone-300 bg-white p-1"
-						/>
-					</div>
-					<button type="button" id="room-wall-reset" class={quiet}>Reset to default</button>
-				</div>
+				<span id="tab-announce" role="status" class="sr-only"></span>
 				<p
 					id="unsaved-indicator"
 					data-dirty="false"
@@ -65,218 +61,289 @@ const transformFields = [
 						class="size-2 rounded-full bg-stone-300 in-data-[dirty=true]:bg-amber-500"></span>
 					<span id="unsaved-text">All changes saved</span>
 				</p>
+				<ul id="admin-warnings" hidden class="max-h-24 list-disc space-y-1 overflow-y-auto pl-5 text-xs text-amber-800"></ul>
 			</header>
 
-			<section aria-labelledby="catalog-heading" class="space-y-2">
-				<h2 id="catalog-heading" class={heading}>Add to room</h2>
-				<div id="catalog" class="flex flex-wrap gap-2"></div>
-			</section>
-
-			<section
-				id="library-section"
-				aria-labelledby="library-heading"
-				data-no-shortcuts
-				class="space-y-3"
-			>
-				<h2 id="library-heading" class={heading}>Model library</h2>
-				<div>
-					<label for="lib-file" class={label}>
-						Import a .glb, or a .gltf together with its .bin and texture files (max 25 MB)
-					</label>
-					<input
-						type="file"
-						id="lib-file"
-						multiple
-						accept=".glb,.gltf,.bin,image/png,image/jpeg,image/webp"
-						class="mt-1 block w-full text-sm text-stone-600 file:mr-3 file:cursor-pointer file:rounded-full file:border-0 file:bg-stone-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-stone-700 hover:file:bg-stone-200 disabled:opacity-40"
-					/>
-				</div>
-				<div id="lib-form" hidden class="space-y-2 rounded-lg bg-stone-50 p-3">
-					<p id="lib-form-info" class="text-xs text-stone-500"></p>
-					<div class="grid grid-cols-[1fr_5.5rem] gap-2">
-						<div>
-							<label for="lib-name" class={label}>Name</label>
-							<input id="lib-name" maxlength="60" autocomplete="off" class={field} />
+			<div class="min-h-0 flex-1 overflow-y-auto p-5">
+				<div role="tabpanel" id="panel-room" aria-labelledby="tab-room" class="space-y-6">
+					<section aria-label="Room" class="space-y-3">
+						<div class="flex items-center gap-3">
+							<label for="room-select" class="sr-only">Room</label>
+							<select id="room-select" class={field}>
+								{rooms.map((room) => <option value={room.slug}>{room.name}'s room</option>)}
+							</select>
 						</div>
-						<div>
-							<label for="lib-scale" class={label}>Scale</label>
-							<input id="lib-scale" type="number" step="0.001" min="0.001" max="50" class={field} />
+						<div class="flex items-end gap-2">
+							<div>
+								<label for="room-wall-color" class={label}>Wall colour of this room</label>
+								<input
+									type="color"
+									id="room-wall-color"
+									class="h-9 w-14 cursor-pointer rounded-lg border border-stone-300 bg-white p-1"
+								/>
+							</div>
+							<button type="button" id="room-wall-reset" class={quiet}>Reset to default</button>
 						</div>
-					</div>
-					<div class="flex gap-2">
-						<button type="button" id="lib-add" class={solid}>Add</button>
-						<button type="button" id="lib-cancel" class={quiet}>Cancel</button>
-					</div>
-				</div>
-				<p id="lib-empty" class="text-sm text-stone-500">No models yet.</p>
-				<ul id="lib-list" class="space-y-1.5"></ul>
-				<button type="button" id="lib-save" class={`${quiet} w-full`}>Save models</button>
-				<p
-					id="lib-status"
-					role="status"
-					aria-live="polite"
-					data-kind="info"
-					class="text-sm text-stone-600 data-[kind=error]:text-red-700 data-[kind=success]:text-green-800"
-				>
-				</p>
-			</section>
+					</section>
 
-			<section aria-labelledby="tools-heading" class="space-y-3">
-				<h2 id="tools-heading" class={heading}>Move, rotate, scale</h2>
-				<div class="flex gap-2" role="group" aria-label="Transform mode">
-					<button
-						type="button"
-						id="mode-translate"
-						aria-pressed="true"
-						class={`${quiet} aria-pressed:bg-stone-900 aria-pressed:text-white aria-pressed:ring-stone-900`}
-						>Move <kbd class="ml-1 text-xs opacity-60">W</kbd></button
-					>
-					<button
-						type="button"
-						id="mode-rotate"
-						aria-pressed="false"
-						class={`${quiet} aria-pressed:bg-stone-900 aria-pressed:text-white aria-pressed:ring-stone-900`}
-						>Rotate <kbd class="ml-1 text-xs opacity-60">E</kbd></button
-					>
-					<button
-						type="button"
-						id="mode-scale"
-						aria-pressed="false"
-						class={`${quiet} aria-pressed:bg-stone-900 aria-pressed:text-white aria-pressed:ring-stone-900`}
-						>Scale <kbd class="ml-1 text-xs opacity-60">R</kbd></button
-					>
-				</div>
-				<label class="flex items-center gap-2 text-sm">
-					<input type="checkbox" id="opt-snap" checked class="size-4 accent-stone-900" />
-					Snap (0.25 grid, 15°, 0.1 scale)
-				</label>
-				<label class="flex items-center gap-2 text-sm">
-					<input type="checkbox" id="opt-bounds" checked class="size-4 accent-stone-900" />
-					Keep inside the room
-				</label>
-			</section>
+					<section aria-labelledby="catalog-heading" class="space-y-2">
+						<h2 id="catalog-heading" class={heading}>Add to room</h2>
+						<div id="catalog" class="flex flex-wrap gap-2"></div>
+					</section>
 
-			<section aria-labelledby="selection-heading" class="space-y-3">
-				<h2 id="selection-heading" class={heading}>Selected object</h2>
-				<p id="selection-empty" class="text-sm text-stone-500">
-					Click an object in the room, or add one above.
-				</p>
-				<div id="selection-panel" hidden class="space-y-3">
-					<p class="text-sm"><strong id="selection-label" class="font-medium">Object</strong></p>
-					<div class="flex items-end gap-2">
+					<section id="objects-section" aria-labelledby="objects-heading" class="space-y-2">
+						<h2 id="objects-heading" class={heading}>Objects in this room</h2>
+						<p id="object-list-empty" class="text-sm text-stone-500">No objects yet.</p>
+						<ul id="object-list" data-no-shortcuts class="max-h-56 space-y-1 overflow-y-auto"></ul>
+					</section>
+
+					<section aria-labelledby="tools-heading" class="space-y-3">
+						<h2 id="tools-heading" class={heading}>Move, rotate, scale</h2>
+						<div class="flex gap-2" role="group" aria-label="Transform mode">
+							<button
+								type="button"
+								id="mode-translate"
+								aria-pressed="true"
+								class={`${quiet} aria-pressed:bg-stone-900 aria-pressed:text-white aria-pressed:ring-stone-900`}
+								>Move <kbd class="ml-1 text-xs opacity-60">W</kbd></button
+							>
+							<button
+								type="button"
+								id="mode-rotate"
+								aria-pressed="false"
+								class={`${quiet} aria-pressed:bg-stone-900 aria-pressed:text-white aria-pressed:ring-stone-900`}
+								>Rotate <kbd class="ml-1 text-xs opacity-60">E</kbd></button
+							>
+							<button
+								type="button"
+								id="mode-scale"
+								aria-pressed="false"
+								class={`${quiet} aria-pressed:bg-stone-900 aria-pressed:text-white aria-pressed:ring-stone-900`}
+								>Scale <kbd class="ml-1 text-xs opacity-60">R</kbd></button
+							>
+						</div>
+						<label class="flex items-center gap-2 text-sm">
+							<input type="checkbox" id="opt-snap" checked class="size-4 accent-stone-900" />
+							Snap (0.25 grid, 15°, 0.1 scale)
+						</label>
+						<label class="flex items-center gap-2 text-sm">
+							<input type="checkbox" id="opt-bounds" checked class="size-4 accent-stone-900" />
+							Keep inside the room
+						</label>
+					</section>
+
+					<section aria-labelledby="selection-heading" class="space-y-3">
+						<h2 id="selection-heading" class={heading}>Selected object</h2>
+						<p id="selection-empty" class="text-sm text-stone-500">
+							Click an object in the room or in the list, or add one above.
+						</p>
+						<div id="selection-panel" hidden class="space-y-3">
+							<p class="text-sm"><strong id="selection-label" class="font-medium">Object</strong></p>
+							<div class="flex items-end gap-2">
+								<div>
+									<label for="sel-color" class={label}>Colour</label>
+									<input
+										type="color"
+										id="sel-color"
+										class="h-9 w-14 cursor-pointer rounded-lg border border-stone-300 bg-white p-1"
+									/>
+								</div>
+								<button type="button" id="sel-color-reset" class={quiet}>Reset colour</button>
+							</div>
+							<div class="space-y-1">
+								<div class="flex items-baseline justify-between">
+									<label for="sel-title" class={label}>Title (optional)</label>
+									<span id="sel-title-count" class="text-xs text-stone-400">0 / 80</span>
+								</div>
+								<input type="text" id="sel-title" maxlength="80" autocomplete="off" class={field} />
+							</div>
+							<div class="space-y-1">
+								<div class="flex items-baseline justify-between">
+									<label for="sel-paragraph" class={label}>Paragraph (optional)</label>
+									<span id="sel-paragraph-count" class="text-xs text-stone-400">0 / 3000</span>
+								</div>
+								<textarea
+									id="sel-paragraph"
+									rows="5"
+									maxlength="3000"
+									aria-describedby="sel-note-help"
+									class={`${field} resize-y`}></textarea>
+								<p id="sel-note-help" class="text-xs text-stone-500">
+									Plain text; line breaks are kept. Visitors open it by clicking the object on the public page. Without a
+									paragraph the object is not clickable.
+								</p>
+							</div>
+							{
+								transformFields.map((group) => (
+									<fieldset>
+										<legend class={label}>{group.title}</legend>
+										<div class="mt-1 grid grid-cols-3 gap-2">
+											{[0, 1, 2].map((axis) => (
+												<input
+													type="number"
+													step={group.step}
+													data-field={`${group.key}-${axis}`}
+													aria-label={`${group.title} ${'XYZ'[axis]}`}
+													class={field}
+												/>
+											))}
+										</div>
+									</fieldset>
+								))
+							}
+							<p
+								id="size-hint"
+								hidden
+								role="status"
+								aria-live="polite"
+								class="rounded-lg bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800"
+							>
+							</p>
+							<div class="flex gap-2">
+								<button type="button" id="btn-duplicate" class={quiet}
+									>Duplicate <kbd class="ml-1 text-xs opacity-60">Ctrl+D</kbd></button
+								>
+								<button
+									type="button"
+									id="btn-delete"
+									class={`${quiet} text-red-700 ring-red-200 hover:bg-red-50`}
+									>Delete <kbd class="ml-1 text-xs opacity-60">Del</kbd></button
+								>
+							</div>
+						</div>
+						<p class="text-xs text-stone-500">
+							<kbd>Esc</kbd> deselects. Drag empty space to turn the view, scroll to zoom.
+						</p>
+					</section>
+				</div>
+
+				<div role="tabpanel" id="panel-all" aria-labelledby="tab-all" hidden class="space-y-6">
+					<p class="text-sm text-stone-600">Everything on this tab applies to every room.</p>
+					<section id="settings-section" aria-labelledby="settings-heading" class="space-y-3">
+						<h2 id="settings-heading" class={heading}>Scene settings</h2>
+						<p class="text-xs text-stone-500">These apply to every room.</p>
+						<div id="settings-panel" class="space-y-2"></div>
+					</section>
+
+					<section
+						id="library-section"
+						aria-labelledby="library-heading"
+						data-no-shortcuts
+						class="space-y-3"
+					>
+						<h2 id="library-heading" class={heading}>Model library</h2>
 						<div>
-							<label for="sel-color" class={label}>Colour</label>
+							<label for="lib-file" class={label}>
+								Import a .glb, or a .gltf together with its .bin and texture files (max 25 MB)
+							</label>
 							<input
-								type="color"
-								id="sel-color"
-								class="h-9 w-14 cursor-pointer rounded-lg border border-stone-300 bg-white p-1"
+								type="file"
+								id="lib-file"
+								multiple
+								accept=".glb,.gltf,.bin,image/png,image/jpeg,image/webp"
+								class="mt-1 block w-full text-sm text-stone-600 file:mr-3 file:cursor-pointer file:rounded-full file:border-0 file:bg-stone-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-stone-700 hover:file:bg-stone-200 disabled:opacity-40"
 							/>
 						</div>
-						<button type="button" id="sel-color-reset" class={quiet}>Reset colour</button>
-					</div>
-					{
-						transformFields.map((group) => (
-							<fieldset>
-								<legend class={label}>{group.title}</legend>
-								<div class="mt-1 grid grid-cols-3 gap-2">
-									{[0, 1, 2].map((axis) => (
-										<input
-											type="number"
-											step={group.step}
-											data-field={`${group.key}-${axis}`}
-											aria-label={`${group.title} ${'XYZ'[axis]}`}
-											class={field}
-										/>
-									))}
+						<div id="lib-form" hidden class="space-y-2 rounded-lg bg-stone-50 p-3">
+							<p id="lib-form-info" class="text-xs text-stone-500"></p>
+							<div class="grid grid-cols-[1fr_5.5rem] gap-2">
+								<div>
+									<label for="lib-name" class={label}>Name</label>
+									<input id="lib-name" maxlength="60" autocomplete="off" class={field} />
 								</div>
-							</fieldset>
-						))
-					}
-					<div class="flex gap-2">
-						<button type="button" id="btn-duplicate" class={quiet}
-							>Duplicate <kbd class="ml-1 text-xs opacity-60">Ctrl+D</kbd></button
+								<div>
+									<label for="lib-scale" class={label}>Scale</label>
+									<input id="lib-scale" type="number" step="0.001" min="0.001" max="50" class={field} />
+								</div>
+							</div>
+							<div class="flex gap-2">
+								<button type="button" id="lib-add" class={solid}>Add</button>
+								<button type="button" id="lib-cancel" class={quiet}>Cancel</button>
+							</div>
+						</div>
+						<p id="lib-empty" class="text-sm text-stone-500">No models yet.</p>
+						<ul id="lib-list" class="space-y-1.5"></ul>
+						<button type="button" id="lib-save" class={`${quiet} w-full`}>Save models</button>
+						<p
+							id="lib-status"
+							role="status"
+							aria-live="polite"
+							data-kind="info"
+							class="text-sm text-stone-600 data-[kind=error]:text-red-700 data-[kind=success]:text-green-800"
 						>
-						<button
-							type="button"
-							id="btn-delete"
-							class={`${quiet} text-red-700 ring-red-200 hover:bg-red-50`}
-							>Delete <kbd class="ml-1 text-xs opacity-60">Del</kbd></button
-						>
-					</div>
+						</p>
+					</section>
 				</div>
-				<p class="text-xs text-stone-500">
-					<kbd>Esc</kbd> deselects. Drag empty space to turn the view, scroll to zoom.
-				</p>
-			</section>
 
-			<section id="settings-section" aria-labelledby="settings-heading" class="space-y-3">
-				<h2 id="settings-heading" class={heading}>Scene settings</h2>
-				<p class="text-xs text-stone-500">
-					These apply to every room. The wall colour above is per room.
-				</p>
-				<div id="settings-panel" class="space-y-2"></div>
-			</section>
+				<div role="tabpanel" id="panel-save" aria-labelledby="tab-save" hidden class="space-y-6">
+					<section aria-labelledby="github-heading" class="space-y-3">
+						<h2 id="github-heading" class={heading}>Save to GitHub</h2>
+						{
+							import.meta.env.DEV && (
+								<p id="dev-save-note" hidden class="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900 ring-1 ring-amber-200">
+									Dev: saving to disk. Save, Save models and Load latest use the files in this checkout (no token needed); commit &amp; push to publish.
+								</p>
+							)
+						}
+						<details id="github-settings" data-github-only class="text-sm">
+							<summary class="cursor-pointer text-stone-600">Repository settings</summary>
+							<div class="mt-3 grid grid-cols-2 gap-2">
+								<div>
+									<label for="gh-owner" class={label}>Owner</label>
+									<input id="gh-owner" autocomplete="off" spellcheck="false" class={field} />
+								</div>
+								<div>
+									<label for="gh-repo" class={label}>Repository</label>
+									<input id="gh-repo" autocomplete="off" spellcheck="false" class={field} />
+								</div>
+								<div>
+									<label for="gh-branch" class={label}>Branch</label>
+									<input id="gh-branch" autocomplete="off" spellcheck="false" class={field} />
+								</div>
+								<div>
+									<label for="gh-path" class={label}>File</label>
+									<input id="gh-path" autocomplete="off" spellcheck="false" class={field} />
+								</div>
+							</div>
+						</details>
 
-			<section aria-labelledby="github-heading" class="space-y-3">
-				<h2 id="github-heading" class={heading}>Save to GitHub</h2>
-				<details id="github-settings" class="text-sm">
-					<summary class="cursor-pointer text-stone-600">Repository settings</summary>
-					<div class="mt-3 grid grid-cols-2 gap-2">
-						<div>
-							<label for="gh-owner" class={label}>Owner</label>
-							<input id="gh-owner" autocomplete="off" spellcheck="false" class={field} />
+						<div data-github-only>
+							<label for="gh-token" class={label}>Access token</label>
+							<input
+								type="password"
+								id="gh-token"
+								autocomplete="new-password"
+								spellcheck="false"
+								placeholder="Fine-grained token, Contents: read and write"
+								class={field}
+							/>
 						</div>
-						<div>
-							<label for="gh-repo" class={label}>Repository</label>
-							<input id="gh-repo" autocomplete="off" spellcheck="false" class={field} />
+						<div data-github-only class="flex items-center justify-between gap-2">
+							<label class="flex items-center gap-2 text-sm">
+								<input type="checkbox" id="gh-remember" class="size-4 accent-stone-900" />
+								Remember on this device
+							</label>
+							<button type="button" id="gh-forget" class={quiet}>Forget token</button>
 						</div>
-						<div>
-							<label for="gh-branch" class={label}>Branch</label>
-							<input id="gh-branch" autocomplete="off" spellcheck="false" class={field} />
+
+						<div class="flex gap-2">
+							<button type="button" id="gh-load" class={quiet}>Load latest</button>
 						</div>
-						<div>
-							<label for="gh-path" class={label}>File</label>
-							<input id="gh-path" autocomplete="off" spellcheck="false" class={field} />
+
+						<div data-github-only>
+							<label for="gh-message" class={label}>Commit message</label>
+							<input id="gh-message" value="Update room scenes via admin" class={field} />
 						</div>
-					</div>
-				</details>
+						<button type="button" id="gh-save" class={`${solid} w-full`}>Save to GitHub</button>
 
-				<div>
-					<label for="gh-token" class={label}>Access token</label>
-					<input
-						type="password"
-						id="gh-token"
-						autocomplete="new-password"
-						spellcheck="false"
-						placeholder="Fine-grained token, Contents: read and write"
-						class={field}
-					/>
+						<p id="gh-status" role="status" aria-live="polite" data-kind="info" class="text-sm text-stone-600 data-[kind=error]:text-red-700 data-[kind=success]:text-green-800"></p>
+						<div id="gh-conflict" hidden class="flex flex-wrap gap-2">
+							<button type="button" id="gh-reload" class={quiet}>Reload (discard my edits)</button>
+							<button type="button" id="gh-overwrite" class={quiet}>Overwrite with my version</button>
+						</div>
+					</section>
 				</div>
-				<div class="flex items-center justify-between gap-2">
-					<label class="flex items-center gap-2 text-sm">
-						<input type="checkbox" id="gh-remember" class="size-4 accent-stone-900" />
-						Remember on this device
-					</label>
-					<button type="button" id="gh-forget" class={quiet}>Forget token</button>
-				</div>
-
-				<div class="flex gap-2">
-					<button type="button" id="gh-load" class={quiet}>Load latest</button>
-				</div>
-
-				<div>
-					<label for="gh-message" class={label}>Commit message</label>
-					<input id="gh-message" value="Update room scenes via admin" class={field} />
-				</div>
-				<button type="button" id="gh-save" class={`${solid} w-full`}>Save to GitHub</button>
-
-				<p id="gh-status" role="status" aria-live="polite" data-kind="info" class="text-sm text-stone-600 data-[kind=error]:text-red-700 data-[kind=success]:text-green-800"></p>
-				<div id="gh-conflict" hidden class="flex flex-wrap gap-2">
-					<button type="button" id="gh-reload" class={quiet}>Reload (discard my edits)</button>
-					<button type="button" id="gh-overwrite" class={quiet}>Overwrite with my version</button>
-				</div>
-				<ul id="admin-warnings" hidden class="list-disc space-y-1 pl-5 text-xs text-amber-800"></ul>
-			</section>
+			</div>
 		</aside>
 
 		<main class="relative min-w-0 flex-1">

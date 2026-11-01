@@ -18,6 +18,10 @@ export interface SceneObject {
 	scale: Vec3;
 	/** `#rrggbb`. Omitted = the catalog default. */
 	color?: string;
+	/** Optional heading of the note shown when a visitor opens the object (plain text, <= LIMITS.maxTitle). */
+	title?: string;
+	/** Optional note (plain text, line breaks kept, <= LIMITS.maxParagraph). Only objects with one are interactive. */
+	paragraph?: string;
 }
 
 export interface RoomObjects {
@@ -69,6 +73,8 @@ export const LIMITS = {
 	minScale: 0.001,
 	maxScale: 50,
 	maxRotation: 36000,
+	maxTitle: 80,
+	maxParagraph: 3000,
 };
 
 export interface ParseOptions {
@@ -122,8 +128,48 @@ function parseVec3(
 	return [value[0] + 0, value[1] + 0, value[2] + 0];
 }
 
+/**
+ * Canonical form of a title/paragraph: `\r\n` (and a lone `\r`) become `\n`, then trimmed.
+ * Empty means "not set". Shared by the parser and the editor so what the editor writes is what the
+ * parser reads back (byte-identical round-trip).
+ */
+export function normalizeNoteText(text: string): string {
+	return text.replace(/\r\n?/g, '\n').trim();
+}
+
+/** Puts the optional keys of `object` back in the file's canonical order (color, title, paragraph), in place. */
+export function restoreKeyOrder(object: SceneObject): void {
+	const { color, title, paragraph } = object;
+	delete object.color;
+	delete object.title;
+	delete object.paragraph;
+	if (color !== undefined) object.color = color;
+	if (title !== undefined) object.title = title;
+	if (paragraph !== undefined) object.paragraph = paragraph;
+}
+
+/** Reads an optional text field. Returns the value, undefined when absent/empty; pushes a note and returns undefined when invalid. */
+function parseNoteField(
+	raw: unknown,
+	name: string,
+	max: number,
+	notes: string[],
+): string | undefined {
+	if (raw === undefined) return undefined;
+	if (typeof raw !== 'string') {
+		notes.push(`${name} must be a string, field dropped`);
+		return undefined;
+	}
+	const text = normalizeNoteText(raw);
+	if (text.length > max) {
+		notes.push(`${name} is longer than ${max} characters (${text.length}), field dropped`);
+		return undefined;
+	}
+	return text === '' ? undefined : text;
+}
+
 /** Returns the cleaned object (canonical key order, unknown keys dropped) or the reason it is invalid. */
-function parseObject(raw: unknown, options: ParseOptions): SceneObject | string {
+function parseObject(raw: unknown, options: ParseOptions, notes: string[]): SceneObject | string {
 	if (!isRecord(raw)) return 'not an object';
 	const { id, type, color } = raw;
 	if (typeof id !== 'string' || !ID_RE.test(id)) return 'id must be 1-64 letters, digits, "_" or "-"';
@@ -164,6 +210,10 @@ function parseObject(raw: unknown, options: ParseOptions): SceneObject | string 
 		if (typeof color !== 'string' || !COLOR_RE.test(color)) return 'color must be "#rrggbb"';
 		out.color = color.toLowerCase();
 	}
+	const title = parseNoteField(raw.title, 'title', LIMITS.maxTitle, notes);
+	if (title !== undefined) out.title = title;
+	const paragraph = parseNoteField(raw.paragraph, 'paragraph', LIMITS.maxParagraph, notes);
+	if (paragraph !== undefined) out.paragraph = paragraph;
 	return out;
 }
 
@@ -212,7 +262,8 @@ export function parseScene(input: unknown, options: ParseOptions = {}): ParseRes
 				overflow++;
 				return;
 			}
-			const result = parseObject(raw, options);
+			const notes: string[] = [];
+			const result = parseObject(raw, options, notes);
 			// Name the object (when it has a readable id/type) so the problem can be found in the editor.
 			const who =
 				isRecord(raw) && typeof raw.id === 'string' && typeof raw.type === 'string'
@@ -226,6 +277,7 @@ export function parseScene(input: unknown, options: ParseOptions = {}): ParseRes
 			} else {
 				seen.add(result.id);
 				objects.push(result);
+				for (const note of notes) warnings.push(`${where}: ${note}`);
 			}
 		});
 		if (overflow) {

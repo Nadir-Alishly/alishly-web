@@ -350,3 +350,222 @@ test('model-limits: parseModels keeps defaultScale 0.001 and drops 0.0009', () =
 	assert.deepEqual(parseModels([{ ...good, defaultScale: 0.0009 }]), []);
 	assert.deepEqual(parseModels([{ ...good, defaultScale: 0.0009 }, { ...good, id: 'ok' }]).map((m) => m.id), ['ok']);
 });
+
+// ---------- object notes: optional title + paragraph (task object-paragraphs) ----------
+
+const noteScene = (over: Record<string, unknown>) => scene({ elnur: roomOf([obj({ color: undefined, ...over })]) });
+const parsedObj = (over: Record<string, unknown>) => parseScene(noteScene(over), opts).scene.rooms.elnur.objects[0];
+
+test('notes: title and paragraph are optional and absent by default', () => {
+	const o = parsedObj({});
+	assert.equal('title' in o, false);
+	assert.equal('paragraph' in o, false);
+	assert.equal(LIMITS.maxTitle, 80);
+	assert.equal(LIMITS.maxParagraph, 3000);
+});
+
+test('notes: title and paragraph are kept', () => {
+	const r = parseScene(noteScene({ title: 'The chair', paragraph: 'Line 1\n\nLine 2' }), opts);
+	assert.deepEqual(r.warnings, []);
+	assert.equal(r.scene.rooms.elnur.objects[0].title, 'The chair');
+	assert.equal(r.scene.rooms.elnur.objects[0].paragraph, 'Line 1\n\nLine 2');
+});
+
+test('notes: trimmed, CRLF and lone CR become LF, inner blank lines and indentation kept', () => {
+	const o = parsedObj({ title: '  Hello \r\n', paragraph: '\r\n  a\r\nb\rc\r\n\r\n  d  \r\n' });
+	assert.equal(o.title, 'Hello');
+	assert.equal(o.paragraph, 'a\nb\nc\n\n  d');
+});
+
+test('notes: empty / whitespace-only values are dropped without a warning', () => {
+	for (const v of ['', '   ', '\r\n\t \n']) {
+		const r = parseScene(noteScene({ title: v, paragraph: v }), opts);
+		assert.deepEqual(r.warnings, [], JSON.stringify(v));
+		const o = r.scene.rooms.elnur.objects[0];
+		assert.equal('title' in o, false);
+		assert.equal('paragraph' in o, false);
+	}
+});
+
+test('notes: exactly at the limit is kept (80 / 3000), measured after normalising', () => {
+	const r = parseScene(noteScene({ title: 'a'.repeat(80), paragraph: 'b'.repeat(3000) }), opts);
+	assert.deepEqual(r.warnings, []);
+	assert.equal(r.scene.rooms.elnur.objects[0].title?.length, 80);
+	assert.equal(r.scene.rooms.elnur.objects[0].paragraph?.length, 3000);
+	// whitespace that is trimmed away does not count against the limit; CRLF counts as one character
+	const padded = parseScene(noteScene({ title: `  ${'a'.repeat(80)}  `, paragraph: ('x'.repeat(99) + '\r\n').repeat(30).trim() }), opts);
+	assert.deepEqual(padded.warnings, []);
+	assert.equal(padded.scene.rooms.elnur.objects[0].paragraph?.length, 99 * 30 + 29);
+});
+
+test('notes: over the limit is dropped with a named warning, the object itself stays', () => {
+	const r = parseScene(noteScene({ title: 'a'.repeat(81), paragraph: 'b'.repeat(3001) }), opts);
+	assert.equal(r.ok, true);
+	assert.equal(r.scene.rooms.elnur.objects.length, 1, 'the object is not dropped, only the field');
+	const o = r.scene.rooms.elnur.objects[0];
+	assert.equal('title' in o, false);
+	assert.equal('paragraph' in o, false);
+	assert.equal(r.warnings.length, 2);
+	assert.match(r.warnings[0], /room "elnur" object #0 \(bed "bed-1"\)/);
+	assert.match(r.warnings[0], /title is longer than 80/);
+	assert.match(r.warnings[1], /paragraph is longer than 3000/);
+});
+
+test('notes: a non-string title/paragraph is dropped with a named warning', () => {
+	for (const bad of [5, true, null, [], {}, ['x']]) {
+		const r = parseScene(noteScene({ title: bad, paragraph: bad }), opts);
+		const o = r.scene.rooms.elnur.objects[0];
+		assert.equal('title' in o, false, JSON.stringify(bad));
+		assert.equal('paragraph' in o, false, JSON.stringify(bad));
+		assert.equal(r.warnings.length, 2, JSON.stringify(bad));
+		assert.match(r.warnings[0], /title must be a string/);
+		assert.match(r.warnings[1], /paragraph must be a string/);
+	}
+});
+
+test('notes: validateScene blocks (non-empty) on an over-limit or non-string field and is empty for valid notes', () => {
+	assert.deepEqual(validateScene(noteScene({ title: 'ok', paragraph: 'ok' }), opts), []);
+	assert.equal(validateScene(noteScene({ paragraph: 'b'.repeat(3001) }), opts).length, 1);
+	assert.equal(validateScene(noteScene({ title: 'a'.repeat(81) }), opts).length, 1);
+	assert.equal(validateScene(noteScene({ title: 7 }), opts).length, 1);
+});
+
+test('notes: one bad field does not affect the other or the neighbours', () => {
+	const r = parseScene(scene({ elnur: roomOf([
+		obj({ id: 'a', title: 'a'.repeat(81), paragraph: 'fine' }),
+		obj({ id: 'b', title: 'fine', paragraph: 3 }),
+		obj({ id: 'c', paragraph: 'fine' }),
+	]) }), opts);
+	const [a, b, c] = r.scene.rooms.elnur.objects;
+	assert.equal(a.title, undefined); assert.equal(a.paragraph, 'fine');
+	assert.equal(b.title, 'fine'); assert.equal(b.paragraph, undefined);
+	assert.equal(c.paragraph, 'fine');
+	assert.equal(r.warnings.length, 2);
+	assert.match(r.warnings[0], /"a"/); assert.match(r.warnings[1], /"b"/);
+});
+
+test('notes: serialize writes title/paragraph after color, in that order, only when set', () => {
+	const objects = [
+		obj({ id: 'a', title: 'T', paragraph: 'P' }),
+		obj({ id: 'b', paragraph: 'only P' }),
+		obj({ id: 'c', title: 'only T' }),
+		obj({ id: 'd' }),
+		obj({ id: 'e', color: undefined, paragraph: 'P', title: 'T' }), // key order in the INPUT must not matter
+	];
+	const r = parseScene(scene({ elnur: roomOf(objects) }), opts);
+	const out = JSON.parse(serializeScene(r.scene)).rooms.elnur.objects as Record<string, unknown>[];
+	const keys = out.map((o) => Object.keys(o).join());
+	assert.equal(keys[0], 'id,type,position,rotation,scale,color,title,paragraph');
+	assert.equal(keys[1], 'id,type,position,rotation,scale,color,paragraph');
+	assert.equal(keys[2], 'id,type,position,rotation,scale,color,title');
+	assert.equal(keys[3], 'id,type,position,rotation,scale,color');
+	assert.equal(keys[4], 'id,type,position,rotation,scale,title,paragraph', 'no color key => notes follow scale directly');
+});
+
+test('notes: the text round-trips through serialize/parse unchanged (stable text)', () => {
+	const payload = '<img src=x onerror=alert(1)>\n"q" \'s\' & <b>x</b>\n\tindent ☃ 😀';
+	const r = parseScene(noteScene({ title: '<b>T</b>', paragraph: payload }), opts);
+	const text = serializeScene(r.scene);
+	const again = parseScene(JSON.parse(text), opts);
+	assert.deepEqual(again.warnings, []);
+	assert.equal(serializeScene(again.scene), text);
+	assert.equal(again.scene.rooms.elnur.objects[0].paragraph, payload, '<img onerror> stays a literal string, nothing is stripped or escaped');
+	assert.equal(again.scene.rooms.elnur.objects[0].title, '<b>T</b>');
+});
+
+test('notes: the committed scene.json at HEAD round-trips byte-identical (no notes => no new keys)', async () => {
+	const { execFileSync } = await import('node:child_process');
+	const { readFileSync } = await import('node:fs');
+	let head: string;
+	try {
+		head = execFileSync('git', ['show', 'HEAD:src/data/scene.json'], { cwd: new URL('..', import.meta.url).pathname, encoding: 'utf8' });
+	} catch {
+		head = readFileSync(new URL('../src/data/scene.json', import.meta.url), 'utf8'); // no git: fall back to the working copy
+	}
+	const models = JSON.parse(readFileSync(new URL('../src/data/models.json', import.meta.url), 'utf8')).map((m: { id: string }) => m.id);
+	const r = parseScene(JSON.parse(head), { slugs: SLUGS, modelIds: models });
+	assert.deepEqual(r.warnings, []);
+	assert.equal(serializeScene(r.scene), head);
+});
+
+test('notes: the working scene.json (seeded or not) also round-trips byte-identical and warning-free', async () => {
+	const { readFileSync } = await import('node:fs');
+	const text = readFileSync(new URL('../src/data/scene.json', import.meta.url), 'utf8');
+	const models = JSON.parse(readFileSync(new URL('../src/data/models.json', import.meta.url), 'utf8')).map((m: { id: string }) => m.id);
+	const r = parseScene(JSON.parse(text), { slugs: SLUGS, modelIds: models });
+	assert.deepEqual(r.warnings, []);
+	assert.equal(serializeScene(r.scene), text);
+});
+
+test('notes: normalizeNoteText and restoreKeyOrder (shared with the editor)', async () => {
+	const { normalizeNoteText, restoreKeyOrder } = await import('../src/data/scene.ts');
+	assert.equal(normalizeNoteText(' \r\na\r\n b\r '), 'a\n b');
+	assert.equal(normalizeNoteText('   '), '');
+	const o: Record<string, unknown> = { id: 'x', type: 'bed', position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1], paragraph: 'P', title: 'T', color: '#000000' };
+	restoreKeyOrder(o as never);
+	assert.equal(Object.keys(o).join(), 'id,type,position,rotation,scale,color,title,paragraph');
+	const bare: Record<string, unknown> = { id: 'x', type: 'bed', position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1], paragraph: 'P' };
+	restoreKeyOrder(bare as never);
+	assert.equal(Object.keys(bare).join(), 'id,type,position,rotation,scale,paragraph', 'absent keys are not created');
+});
+
+// ---------- round 2: warnings of kept objects only, never throws, '<' escaping of the embedded JSON ----------
+
+test('notes r2: the warning text names room, index, type and id, and the limit', () => {
+	const r = parseScene(scene({ elnur: roomOf([obj({ paragraph: 'p'.repeat(3001) })]) }), opts);
+	assert.deepEqual(r.warnings, ['room "elnur" object #0 (bed "bed-1"): paragraph is longer than 3000 characters (3001), field dropped']);
+	const t = parseScene(scene({ elnur: roomOf([obj({ title: 'x'.repeat(81) })]) }), opts);
+	assert.deepEqual(t.warnings, ['room "elnur" object #0 (bed "bed-1"): title is longer than 80 characters (81), field dropped']);
+	const n = parseScene(scene({ elnur: roomOf([obj({ paragraph: 42 })]) }), opts);
+	assert.deepEqual(n.warnings, ['room "elnur" object #0 (bed "bed-1"): paragraph must be a string, field dropped']);
+});
+
+test('notes r2: a dropped object reports only why it was dropped, not its note problems', () => {
+	const r = parseScene(scene({ elnur: roomOf([
+		obj({ id: 'bad', type: 'nope', paragraph: 'z'.repeat(5000) }),
+		obj({ id: 'ok', paragraph: 'fine' }),
+		obj({ id: 'ok', paragraph: 'q'.repeat(5000) }), // duplicate id: dropped
+	]) }), opts);
+	assert.equal(r.warnings.length, 2);
+	assert.match(r.warnings[0], /unknown type "nope", dropped$/);
+	assert.match(r.warnings[1], /duplicate id "ok", dropped$/);
+	assert.equal(r.scene.rooms.elnur.objects.length, 1);
+});
+
+test('notes r2: parseScene never throws whatever the title/paragraph is (sweep), and bad ones are always dropped + reported', () => {
+	const values: unknown[] = [null, true, false, 0, -1, 1.5, NaN, Infinity, [], [1], {}, { a: 1 }, () => 1, Symbol.iterator, 10n, 'x'.repeat(100000), '\u0000', '\ud800'];
+	for (const v of values) {
+		for (const key of ['title', 'paragraph']) {
+			let r;
+			assert.doesNotThrow(() => { r = parseScene(noteScene({ [key]: v }), opts); }, `${key}=${String(typeof v)}`);
+			const o = (r as ReturnType<typeof parseScene>).scene.rooms.elnur.objects[0];
+			if (typeof v !== 'string') {
+				assert.equal(key in o, false);
+				assert.equal((r as ReturnType<typeof parseScene>).warnings.length, 1);
+			}
+		}
+	}
+});
+
+test('notes r2: a scene.json read by the build (load-scene logic) with over-limit notes still yields a usable scene + warnings', () => {
+	const text = JSON.stringify(scene({ elnur: roomOf([obj({ id: 'a', paragraph: 'p'.repeat(3001) }), obj({ id: 'b', paragraph: 'ok' })]) }));
+	const { scene: s, warnings, ok } = parseScene(JSON.parse(text), opts);
+	assert.equal(ok, true);
+	assert.equal(warnings.length, 1);
+	assert.deepEqual(s.rooms.elnur.objects.map((o) => [o.id, o.paragraph ?? null]), [['a', null], ['b', 'ok']]);
+});
+
+test("notes r2: the page embeds scene JSON with '<' written as \\u003c; it parses back to the exact original text", () => {
+	const texts = ['<script>alert(1)</script>', '</script><script>x', '<img src=x onerror=alert(1)>', '<!-- x -->', 'a < b > c & "d" \'e\'', '\\u003c literal backslash-u', '<<<'];
+	for (const t of texts) {
+		const embedded = JSON.stringify({ paragraph: t, title: t }).replace(/</g, '\\u003c');
+		assert.equal(embedded.includes('<'), false, 'no raw < left');
+		const back = JSON.parse(embedded);
+		assert.equal(back.paragraph, t);
+		assert.equal(back.title, t);
+	}
+	// and through the scene model end to end
+	const r = parseScene(noteScene({ paragraph: texts.join('\n') }), opts);
+	const embedded = JSON.stringify(r.scene).replace(/</g, '\\u003c');
+	assert.equal(parseScene(JSON.parse(embedded), opts).scene.rooms.elnur.objects[0].paragraph, texts.join('\n'));
+});

@@ -32,6 +32,14 @@ const expectedColors = (slug) => {
 let failed = 0;
 const check = (ok, msg) => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${msg}`); };
 const read = (p) => readFileSync(join(dist, p), 'utf8');
+// Scene text (titles/paragraphs written in /admin) travels in the data-room / data-rooms / data-bundled attributes. Astro
+// escapes quotes and & there but NOT < or >, so a paragraph such as "<script>...</script>" or "<img onerror=...>" puts raw
+// tag-looking text inside an attribute value (harmless to browsers, fatal to naive regexes). Markup checks therefore run on
+// `blankData(html)`, where those attribute values are emptied; checks about the data itself use the raw html.
+const DATA_ATTR_RE = /(\sdata-(?:room|rooms|bundled)=)("[^"]*"|'[^']*')/g;
+const blankData = (html) => html.replace(DATA_ATTR_RE, '$1""');
+const unescapeAttr = (v) => v.replace(/&quot;/g, '"').replace(/&#39;|&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+const attrValue = (html, name) => { const m = html.match(new RegExp(`\\s${name}="([^"]*)"`)); return m ? unescapeAttr(m[1]) : null; };
 const navOf = (html) => html.match(/<nav aria-label="Rooms"[\s\S]*?<\/nav>/)?.[0] ?? '';
 const links = (nav) => [...nav.matchAll(/<a href="([^"]+)"([^>]*)>/g)].map((m) => ({ href: m[1], attrs: m[2] }));
 
@@ -51,7 +59,8 @@ for (const [slug, name] of members) {
   const f = `rooms/${slug}/index.html`;
   check(existsSync(join(dist, f)), `${f} exists`);
   if (!existsSync(join(dist, f))) continue;
-  const html = read(f);
+  const rawHtml = read(f);
+  const html = blankData(rawHtml); // markup checks run without the scene text of data-room (see blankData)
   check(new RegExp(`<h1[^>]*>${name}'s room</h1>`).test(html), `${slug}: <h1> is "${name}'s room"`);
   check(html.includes(`<title>${name}&#39;s room`), `${slug}: <title> has name`);
   const nav = links(navOf(html)).filter((l) => l.href.startsWith('/rooms/'));
@@ -63,7 +72,7 @@ for (const [slug, name] of members) {
   check(/<canvas[^>]*role="img"[^>]*aria-label="[^"]*\S[^"]*"/.test(html), `${slug}: canvas has role=img + aria-label`);
   check(html.includes(`aria-label="Isometric 3D view of ${name}'s room`), `${slug}: canvas aria-label names the member`);
   check(/data-astro-transition-persist="room-scene"/.test(html), `${slug}: persisted wrapper present`);
-  const cfg = html.match(/data-room="([^"]+)"/)?.[1].replace(/&quot;/g, '"');
+  const cfg = rawHtml.match(/data-room="([^"]+)"/)?.[1].replace(/&quot;/g, '"');
   let parsed; try { parsed = JSON.parse(cfg); } catch {}
   check(parsed?.name === name && ['leftWall', 'rightWall', 'floor'].every((k) => /^#[0-9a-f]{6}$/i.test(parsed.colors?.[k] ?? '')) && !('trim' in (parsed.colors ?? {})), `${slug}: data-room JSON valid`);
   check(/astro-view-transitions-enabled/.test(html), `${slug}: ClientRouter enabled`);
@@ -228,7 +237,7 @@ for (const [slug] of members) {
 // No public bundle may contain the admin-only model registry / editor code. The files each public page loads are collected
 // from its <script src> / modulepreload URLs and followed through their static imports (shared chunks like room-core).
 {
-  const ADMIN_ONLY = ['no visible geometry', 'parseAsync', 'registerModel', 'inspectModel', 'TransformControls', 'git/blobs'];
+  const ADMIN_ONLY = ['no visible geometry', 'parseAsync', 'registerModel', 'inspectModel', 'TransformControls', 'git/blobs', 'sel-paragraph', 'sel-title', 'setSelectedParagraph', 'Has a note'];
   const pages = ['index.html', ...readdirSync(join(dist, 'rooms')).map((r) => `rooms/${r}/index.html`)];
   const seen = new Set();
   const visit = (file) => {
@@ -257,13 +266,20 @@ for (const [slug] of members) {
   const adminSrc = [...adminSeen].map(read).join('\n');
   check(adminSrc.includes('no visible geometry') && adminSrc.includes('parseAsync'), 'control: the admin bundle graph does contain the model registry strings');
   check([...adminSeen].some((f) => !seen.has(f)), 'control: the admin loads scripts the public pages do not');
+  // object-paragraphs: the note editor fields are in the admin graph; the popup/hover code (room-interact) is in the public graph
+  // and NOT in the admin graph (the admin 3D view gets no hover or popup)
+  check(adminSrc.includes('sel-paragraph') && adminSrc.includes('sel-title') && adminSrc.includes('Has a note'), 'control: the admin bundle graph contains the note editor strings');
+  const publicSrc = [...seen].map(read).join('\n');
+  check(['data-note-popup', 'data-note-list', 'data-note-close'].every((t) => publicSrc.includes(t)), 'the public room bundle graph contains the note popup / list code (room-interact)');
+  check(!['data-note-popup', 'data-note-list', 'data-note-layer'].some((t) => adminSrc.includes(t)), 'the admin bundle graph has no hover/popup code (data-note-popup / data-note-list / data-note-layer)');
 }
 
 // /admin page
 const adminOk = existsSync(join(dist, 'admin/index.html'));
 check(adminOk, 'dist/admin/index.html exists');
 if (adminOk) {
-  const admin = read('admin/index.html');
+  const adminRaw = read('admin/index.html');
+  const admin = blankData(adminRaw); // markup checks must not see scene text inside data-bundled / data-rooms (see blankData)
   const metas = [...admin.matchAll(/<meta\b[^>]*>/g)].map((m) => m[0]);
   const robots = metas.find((m) => /name="robots"/.test(m)) ?? '';
   check(/content="[^"]*noindex/.test(robots), 'admin: meta robots noindex');
@@ -294,7 +310,7 @@ if (adminOk) {
   const tokenInput = admin.match(/<input\b[^>]*\bid="gh-token"[^>]*>/)?.[0] ?? '';
   check(/autocomplete="new-password"/.test(tokenInput), 'admin: token input has autocomplete="new-password"');
   check(!/\bvalue=/.test(tokenInput), 'admin: token input has no pre-filled value');
-  check(!/(?:github_pat_|ghp_)[A-Za-z0-9_]{6,}/.test(admin), 'admin: no token-looking string in page');
+  check(!/(?:github_pat_|ghp_)[A-Za-z0-9_]{6,}/.test(adminRaw), 'admin: no token-looking string in page');
   // model-limits: import scale field allows 0.001 and the size label says 25 MB (no stale 10 MB copy)
   const libScale = admin.match(/<input\b[^>]*\bid="lib-scale"[^>]*>/)?.[0] ?? '';
   check(!!libScale, 'admin: #lib-scale input exists');
@@ -312,12 +328,132 @@ if (adminOk) {
   for (const id of ['settings-panel', 'room-wall-color', 'room-wall-reset']) check(new RegExp(`id="${id}"`).test(admin), `admin: has #${id}`);
   check(/<input[^>]*id="room-wall-color"[^>]*type="color"|<input[^>]*type="color"[^>]*id="room-wall-color"/.test(admin), 'admin: wall colour input is type=color');
   check(!/<script[^>]*>[^<]*Floor texture/.test(admin), 'admin: schema text is not inlined into the page');
+  // Sidebar tabs (This room | All rooms | Save) and the "Objects in this room" list
+  {
+    const attr = (tag, name) => tag.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1];
+    const tagsWithRole = (role) => [...admin.matchAll(/<(?:div|button|ul|nav|section)\b[^>]*>/g)].map((m) => m[0]).filter((t) => attr(t, 'role') === role);
+    const lists = tagsWithRole('tablist');
+    const tabs = tagsWithRole('tab');
+    const panels = tagsWithRole('tabpanel');
+    check(lists.length === 1 && !!attr(lists[0], 'aria-label'), 'admin: exactly one role=tablist with an aria-label');
+    check(tabs.length === 3, `admin: 3 role=tab buttons (${tabs.length})`);
+    check(panels.length === 3, `admin: 3 role=tabpanel panels (${panels.length})`);
+    check(tabs.map((t) => attr(t, 'id')).join() === 'tab-room,tab-all,tab-save', 'admin: tabs are #tab-room, #tab-all, #tab-save in that order');
+    check(tabs.map((t) => attr(t, 'aria-selected')).join() === 'true,false,false', 'admin: only "This room" is aria-selected by default');
+    check(tabs.map((t) => attr(t, 'tabindex')).join() === '0,-1,-1', 'admin: roving tabindex (selected 0, others -1)');
+    check(tabs.every((t) => /\btype="button"/.test(t)), 'admin: tabs are type=button (never submit)');
+    check(new Set(tabs.map((t) => attr(t, 'aria-controls'))).size === 3 && tabs.every((t) => panels.some((p) => attr(p, 'id') === attr(t, 'aria-controls'))), 'admin: every tab aria-controls an existing tabpanel id');
+    check(panels.every((p) => tabs.some((t) => attr(t, 'id') === attr(p, 'aria-labelledby') && attr(t, 'aria-controls') === attr(p, 'id'))), 'admin: every tabpanel aria-labelledby its tab (and the tab points back)');
+    check(panels.map((p) => /\shidden(\s|>|=)/.test(p)).join() === 'false,true,true', 'admin: only the This room panel is visible by default (others have hidden)');
+    const panelHtml = (id) => admin.split(new RegExp(`<div[^>]*role="tabpanel"[^>]*id="${id}"`))[1]?.split(/<div[^>]*role="tabpanel"/)[0] ?? '';
+    const room = panelHtml('panel-room'), all = panelHtml('panel-all'), save = panelHtml('panel-save');
+    check(['room-select', 'room-wall-color', 'catalog', 'object-list', 'object-list-empty', 'size-hint'].every((id) => room.includes(`id="${id}"`)), 'admin: This room panel holds room picker, wall colour, Add to room, object list and size hint');
+    check(all.includes('Scene settings') && all.includes('id="lib-scale"') && /max 25 MB/.test(all), 'admin: All rooms panel holds Scene settings and the Model library');
+    check(save.includes('id="gh-token"') && save.includes('id="gh-status"'), 'admin: Save panel holds the GitHub token field and status line');
+    check(!room.includes('id="gh-token"') && !all.includes('id="gh-token"'), 'admin: the token field is only in the Save panel');
+    // unsaved indicator + warnings live outside the panels, so they show on every tab
+    const outside = admin.replace(/<div[^>]*role="tabpanel"[\s\S]*$/, '');
+    check(/id="unsaved-indicator"/.test(outside) && /id="admin-warnings"/.test(outside), 'admin: #unsaved-indicator and #admin-warnings are above the tab panels (visible on every tab)');
+    check(/id="tab-save-flag"/.test(admin), 'admin: Save tab has a #tab-save-flag attention marker');
+    const announce = admin.match(/<[a-z]+\b[^>]*\bid="tab-announce"[^>]*>/)?.[0] ?? '';
+    check(!!announce && /\brole="status"/.test(announce) && /\bsr-only\b/.test(announce) && outside.includes('id="tab-announce"'), 'admin: #tab-announce is an sr-only role=status live region above the tab panels');
+    const ul = admin.match(/<ul\b[^>]*\bid="object-list"[^>]*>/)?.[0] ?? '';
+    check(!!ul && /\bdata-no-shortcuts\b/.test(ul), 'admin: #object-list exists and is data-no-shortcuts (Del in the list cannot delete)');
+    check(/<p\b[^>]*\bid="object-list-empty"[^>]*>\s*No objects yet\.?/.test(admin), 'admin: #object-list-empty says "No objects yet"');
+    check(/id="objects-heading"/.test(admin) && /Objects in this room/.test(admin), 'admin: "Objects in this room" heading present');
+    check(/<p\b[^>]*\bid="size-hint"[^>]*\bhidden\b[^>]*role="status"|<p\b[^>]*\bid="size-hint"[^>]*role="status"[^>]*\bhidden\b/.test(admin), 'admin: #size-hint is a hidden role=status region by default');
+    check(!/wall colour above is per room/i.test(admin), 'admin: the old "wall colour above is per room" sentence is gone');
+    check(/<h1\b/.test(admin) && (admin.match(/<h1\b/g) ?? []).length === 1, 'admin: exactly one <h1>');
+    for (const id of ['room-select', 'catalog', 'gh-status', 'gh-token', 'lib-scale', 'settings-panel', 'room-wall-color', 'room-wall-reset']) {
+      check((admin.match(new RegExp(`id="${id}"`, 'g')) ?? []).length === 1, `admin: #${id} exists exactly once (all ids stay in the DOM)`);
+    }
+  }
+}
+
+// object-paragraphs: markup of the note popup / keyboard list on room pages (never on the picker or /admin), the seeded text in data-room
+{
+  const tagsOf = (html, re) => [...html.matchAll(re)].map((m) => m[0]);
+  const tagWith = (html, attrName) => tagsOf(html, /<[a-z0-9]+\b[^>]*>/g).filter((t) => new RegExp(`\\s${attrName}(\\s|=|>|/)`).test(t));
+  const attr = (tag, name) => tag.match(new RegExp(`\\s${name}="([^"]*)"`))?.[1];
+  for (const [slug] of members) {
+    const raw = read(`rooms/${slug}/index.html`);
+    const html = blankData(raw);
+    const list = tagWith(html, 'data-note-list');
+    check(list.length === 1 && /^<ul\b/.test(list[0]) && !!attr(list[0], 'aria-label'), `${slug}: exactly one <ul data-note-list aria-label=...> (keyboard list)`);
+    const popup = tagWith(html, 'data-note-popup');
+    check(popup.length === 1 && attr(popup[0], 'role') === 'dialog' && /\shidden(\s|>|=)/.test(popup[0]) && (!!attr(popup[0], 'aria-labelledby') || !!attr(popup[0], 'aria-label')), `${slug}: exactly one hidden role=dialog popup with an accessible label`);
+    const close = tagWith(html, 'data-note-close');
+    check(close.length === 1 && /^<button\b/.test(close[0]) && /\btype="button"/.test(close[0]) && !!attr(close[0], 'aria-label'), `${slug}: one type=button close button with an aria-label`);
+    check(tagWith(html, 'data-note-body').length === 1 && tagWith(html, 'data-note-title').length === 1 && tagWith(html, 'data-note-text').length === 1 && tagWith(html, 'data-note-layer').length === 1, `${slug}: popup body, title, text and layer elements exist once`);
+    // inside the persisted wrapper (the markup must survive view transitions with the canvas) and after the canvas
+    const wrapper = html.split(/data-astro-transition-persist="room-scene"/)[1] ?? '';
+    check(wrapper.includes('data-note-popup') && wrapper.includes('data-note-list') && wrapper.indexOf('<canvas') < wrapper.indexOf('data-note-popup'), `${slug}: the note markup is inside the persisted room-scene wrapper, after the canvas`);
+    check((html.match(/<canvas/g) ?? []).length === 1, `${slug}: still exactly one <canvas> with the note markup`);
+    // m3/m6: list semantics, scrollable note region, no raw '<' in the embedded scene JSON (written as \\u003c)
+    check(/^<ul\b[^>]*\brole="list"/.test(list[0] ?? ''), `${slug}: the keyboard list <ul> keeps role="list" (list-style none would drop it in Safari)`);
+    const body = tagWith(html, 'data-note-body');
+    check(body.length === 1 && attr(body[0], 'tabindex') === '0' && attr(body[0], 'role') === 'region' && !!attr(body[0], 'aria-label'), `${slug}: the note body is a focusable labelled region (keyboard users can scroll a long note)`);
+    {
+      const rawAttr = raw.match(/\sdata-room="([^"]*)"/)?.[1] ?? '';
+      check(rawAttr !== '' && !rawAttr.includes('<'), `${slug}: data-room has no raw '<' (scene text cannot form tags in the HTML source)`);
+    }
+    // the scene's text reaches the page through data-room (decoded value equals scene.json's title/paragraph, verbatim)
+    let cfg; try { cfg = JSON.parse(attrValue(raw, 'data-room')); } catch {}
+    const want = sceneParsed.scene.rooms[slug].objects.map((o) => [o.id, o.title ?? null, o.paragraph ?? null]);
+    const got = (cfg?.objects ?? []).map((o) => [o.id, o.title ?? null, o.paragraph ?? null]);
+    check(JSON.stringify(got) === JSON.stringify(want), `${slug}: data-room carries every title/paragraph of scene.json verbatim (${want.filter((w) => w[2]).length} note(s))`);
+  }
+  check(tagWith(blankData(index), 'data-note-popup').length === 0 && tagWith(blankData(index), 'data-note-list').length === 0, 'picker: no note popup / list markup');
+  check(!/data-note-/.test(blankData(read('admin/index.html'))), 'admin page: no public note popup / list markup');
+}
+
+// object-paragraphs: robustness of the markup checks against scene text with tag-looking content in data attributes
+{
+  const evil = (v) => `<div data-room="${v}" class="x"><canvas></canvas><button data-note-close></button></div>`;
+  const payloads = ['<script>alert(1)</script>', '<script src=x>', '</script><script>', '<img src=x onerror=alert(1)>', 'javascript:alert(1) <a href="javascript:1">', '<canvas><canvas>', 'github_pat_ABCDEFGHIJ'];
+  for (const p of payloads) {
+    const esc = JSON.stringify({ paragraph: p }).replace(/&/g, '&amp;').replace(/"/g, '&quot;'); // what Astro writes: quotes and & escaped, < > not
+    const html = evil(esc);
+    const blanked = blankData(html);
+    check(!/<script|<img|javascript:|<canvas><canvas>|github_pat_/i.test(blanked.replace('<canvas></canvas>', '')), `blankData: payload ${JSON.stringify(p).slice(0, 36)} cannot reach the markup checks`);
+    check((blanked.match(/<canvas/g) ?? []).length === 1 && blanked.includes('data-note-close') && blanked.includes('class="x"'), `blankData: markup around the payload ${JSON.stringify(p).slice(0, 24)} is intact`);
+    check(JSON.parse(attrValue(html, 'data-room')).paragraph === p, `unescapeAttr/attrValue: payload ${JSON.stringify(p).slice(0, 24)} decodes back verbatim`);
+  }
+  // the original (un-blanked) naive regex WOULD be fooled: this is why the checks use blankData
+  const naive = /<script\b([^>]*)>([\s\S]*?)<\/script>/g;
+  check([...evil(JSON.stringify({ paragraph: '<script>alert(1)</script>' }).replace(/"/g, '&quot;')).matchAll(naive)].length === 1, 'control: the unprotected <script> regex does match script text inside an attribute value');
+  check([...blankData(evil(JSON.stringify({ paragraph: '<script>alert(1)</script>' }).replace(/"/g, '&quot;'))).matchAll(naive)].length === 0, 'blankData removes that false match');
+}
+
+// object-paragraphs: /admin note fields
+{
+  const admin = blankData(read('admin/index.html'));
+  const tagById = (id) => [...admin.matchAll(/<[a-z0-9]+\b[^>]*>/g)].map((m) => m[0]).filter((t) => new RegExp(`\\sid="${id}"`).test(t));
+  const attr = (tag, name) => tag.match(new RegExp(`\\s${name}="([^"]*)"`))?.[1];
+  const title = tagById('sel-title');
+  check(title.length === 1 && /^<input\b/.test(title[0]) && attr(title[0], 'type') === 'text' && attr(title[0], 'maxlength') === '80', 'admin: #sel-title is exactly one <input type=text maxlength="80">');
+  const para = tagById('sel-paragraph');
+  check(para.length === 1 && /^<textarea\b/.test(para[0]) && attr(para[0], 'maxlength') === '3000', 'admin: #sel-paragraph is exactly one <textarea maxlength="3000">');
+  check(tagById('sel-title-count').length === 1 && tagById('sel-paragraph-count').length === 1, 'admin: one character counter for each field');
+  check(/<label\b[^>]*\bfor="sel-title"/.test(admin) && /<label\b[^>]*\bfor="sel-paragraph"/.test(admin), 'admin: both fields have a <label for=...>');
+  // the fields live in the "Selected object" area of the This room panel
+  const roomPanel = admin.split(/<div[^>]*role="tabpanel"[^>]*id="panel-room"/)[1]?.split(/<div[^>]*role="tabpanel"/)[0] ?? '';
+  check(roomPanel.includes('id="sel-title"') && roomPanel.includes('id="sel-paragraph"'), 'admin: the note fields are in the This room panel');
+  check(!/data-note-popup/.test(admin) && !/\bdata-room=/.test(admin), 'admin: no popup markup and no public data-room wrapper');
+  {
+    const raw = read('admin/index.html');
+    const attrs = [...raw.matchAll(/\sdata-(?:bundled|rooms)="([^"]*)"/g)].map((m) => m[1]);
+    check(attrs.length === 2 && attrs.every((v) => !v.includes('<')), 'admin: data-bundled / data-rooms have no raw < (scene text is escaped as \\u003c)');
+    let parsed; try { parsed = JSON.parse(unescapeAttr(raw.match(/\sdata-bundled="([^"]*)"/)[1])); } catch {}
+    const notes = (r) => (parsed?.rooms?.[r]?.objects ?? []).map((o) => [o.id, o.title ?? null, o.paragraph ?? null]);
+    check(members.every(([s]) => JSON.stringify(notes(s)) === JSON.stringify(sceneParsed.scene.rooms[s].objects.map((o) => [o.id, o.title ?? null, o.paragraph ?? null]))), 'admin: data-bundled decodes to every title/paragraph of scene.json verbatim');
+  }
 }
 
 // Public pages: no admin link, no editor/GitHub code in any JS they can load
 const publicPages = ['index.html', ...members.map(([s]) => `rooms/${s}/index.html`)];
 for (const f of publicPages) {
-  const html = read(f);
+  const html = blankData(read(f));
   const hrefs = [...html.matchAll(/\b(?:href|src|action)="([^"]*)"/g)].map((m) => m[1]);
   check(!hrefs.some((h) => /^\/admin(\/|$|\?|#)/.test(h) || /\/admin\/?(\?|#|$)/.test(h)), `${f}: no link to /admin`);
   check(!/<a\b[^>]*>[^<]*admin/i.test(html), `${f}: no link text mentioning admin`);
@@ -327,7 +463,7 @@ const reach = new Set();
 const queue = [];
 const enqueue = (u) => { const p = u.replace(/^\//, ''); if (!reach.has(p) && existsSync(join(dist, p))) { reach.add(p); queue.push(p); } };
 for (const f of publicPages) {
-  for (const m of read(f).matchAll(/<(?:script|link)\b[^>]*\b(?:src|href)="(\/_astro\/[^"]+\.js)"/g)) enqueue(m[1]);
+  for (const m of blankData(read(f)).matchAll(/<(?:script|link)\b[^>]*\b(?:src|href)="(\/_astro\/[^"]+\.js)"/g)) enqueue(m[1]);
 }
 while (queue.length) {
   const p = queue.pop();
@@ -343,11 +479,11 @@ check(!reachFiles.some((p) => /index\.astro_astro_type_script/.test(p)), 'admin 
 // scene-settings: the admin-only panel schema (labels, hints, grouping) must not ship to the public
 for (const marker of ['Floor texture', 'Advanced shadows', 'Reset to defaults', 'Shadow bias fixes speckles', "Exposure doesn't dim", 'Bump strength', 'Scene settings', 'setting-floor']) {
   check(!reachFiles.some((p) => read(p).includes(marker)), `no admin settings-panel text "${marker}" in any JS reachable from public pages`);
-  check(publicPages.every((f) => !read(f).includes(marker)), `no "${marker}" in the HTML of public pages`);
+  check(publicPages.every((f) => !blankData(read(f)).includes(marker)), `no "${marker}" in the HTML of public pages`);
 }
 check(!reachFiles.some((p) => /room-wall-color|settings-panel/.test(read(p))), 'no settings-panel / room-wall-color element ids in public JS');
 // Inline module scripts on public pages must not contain admin/GitHub code either
-check(publicPages.every((f) => ![...read(f).matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].some((m) => /TransformControls|api\.github\.com/.test(m[1]))), 'no editor/GitHub code in inline scripts of public pages');
+check(publicPages.every((f) => ![...blankData(read(f)).matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].some((m) => /TransformControls|api\.github\.com/.test(m[1]))), 'no editor/GitHub code in inline scripts of public pages');
 // Picker still loads no three.js (only the ClientRouter chunk)
 {
   const pickerJs = [...index.matchAll(/<script\b[^>]*\bsrc="(\/_astro\/[^"]+)"/g)].map((m) => m[1]);
@@ -394,6 +530,38 @@ check(publicPages.every((f) => ![...read(f).matchAll(/<script\b[^>]*>([\s\S]*?)<
 {
   const bad = walk(dist).filter((f) => /github_pat_|ghp_[A-Za-z0-9]|gho_[A-Za-z0-9]|ghs_[A-Za-z0-9]/.test(readFileSync(f, 'latin1')));
   check(bad.length === 0, `no "github_pat_" / "ghp_" token strings in dist${bad.length ? ` (${bad.join(', ')})` : ''}`);
+}
+// Local save (dev-only, task local-save): nothing of it may reach the production build. The dev endpoint, its custom
+// header, the dev wording and the local client are all behind `import.meta.env.DEV` / `apply: 'serve'`.
+{
+  const LOCAL_MARKERS = [
+    '__local-save', 'local-save', 'X-Alishly-Local-Save', 'x-alishly-local-save', 'alishly-local-save',
+    'Save to disk', 'Dev: saving', 'saving to disk', 'commit & push', 'commit &amp; push', 'dev-save-note',
+    'createLocalClient', 'pingLocal', 'LOCAL_WORDING', 'LOCAL_BASE', 'local-client', 'useLocalLayout', 'localActive',
+    'Loaded the latest scene from disk', 'model library on disk', 'public/models and src/data/models.json',
+    // fix round 1
+    'probeLocal', 'probeDevBackend', 'write it to disk', 'Nothing was saved', 'another server on this port', 'npm run dev',
+  ];
+  const files = walk(dist).filter((f) => !/\.(glb|png|jpe?g|webp|woff2?|ico)$/i.test(f));
+  const hits = [];
+  for (const f of files) {
+    const text = readFileSync(f, 'utf8');
+    for (const marker of LOCAL_MARKERS) if (text.includes(marker)) hits.push(`${f.slice(dist.length)} ~ ${marker}`);
+  }
+  check(hits.length === 0, `no local-save code, endpoint, header or dev wording anywhere in dist (${files.length} text files)${hits.length ? `: ${hits.slice(0, 6).join('; ')}` : ''}`);
+  check(!walk(dist).some((f) => /local-client|local-save|backend/i.test(f.slice(dist.length))), 'dist has no local-client / local-save / backend file or chunk');
+  if (existsSync(join(dist, 'admin/index.html'))) {
+    const admin = read('admin/index.html');
+    check(!/dev-save-note/.test(admin) && !/Dev:\s*saving/.test(admin) && !/Save to disk/.test(admin), 'admin: production HTML has no dev-save-note / "Dev: saving" / "Save to disk" markup');
+    check(/<h2[^>]*id="github-heading"[^>]*>Save to GitHub<\/h2>/.test(admin) && /<button[^>]*id="gh-save"[^>]*>Save to GitHub<\/button>/.test(admin), 'admin: production Save panel still says "Save to GitHub" (heading and button)');
+    check(/id="gh-token"/.test(admin) && /id="gh-message"/.test(admin) && /id="github-settings"/.test(admin) && !/\bid="gh-token"[^>]*\bhidden\b/.test(admin), 'admin: the GitHub token / commit-message / repository-settings inputs are all present and not hidden in production');
+    // fix round 1: the inert data-github-only markers exist in production and nothing hides them
+    const only = admin.match(/<[^>]*\bdata-github-only\b[^>]*>/g) ?? [];
+    check(only.length >= 4 && only.every((tag) => !/\bhidden\b/.test(tag)), `admin: ${only.length} data-github-only elements are present in production HTML and none is hidden`);
+    // the admin script still holds the GitHub wording (it is the default backend)
+    const adminJs = walk(join(dist, '_astro')).filter((f) => f.endsWith('.js')).map((f) => readFileSync(f, 'utf8'));
+    check(adminJs.some((t) => t.includes('Saved — site rebuilding') || t.includes('site rebuilding')), 'admin JS: the GitHub "site rebuilding" wording is still shipped');
+  }
 }
 // Plan: unknown-slug / admin must not leak into the page set
 check(readdirSync(join(dist, 'rooms')).length === 7, 'dist/rooms still has exactly 7 entries (admin is not under rooms)');

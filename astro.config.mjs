@@ -1,6 +1,7 @@
 // @ts-check
 import { defineConfig, fontProviders } from 'astro/config';
 import tailwindcss from '@tailwindcss/vite';
+import localSave from './dev/local-save-plugin.mjs';
 
 // https://astro.build/config
 export default defineConfig({
@@ -25,6 +26,7 @@ export default defineConfig({
 		},
 	],
 	vite: {
-		plugins: [tailwindcss()],
+		// localSave: dev-only (apply: 'serve'), lets /admin save to disk; inert in `astro build`.
+		plugins: [tailwindcss(), localSave()],
 	},
 });

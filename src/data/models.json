@@ -4,5 +4,17 @@
 		"label": "tall house plant",
 		"file": "/models/tall-house-plant.glb",
 		"defaultScale": 0.01
+	},
+	{
+		"id": "piano-classic",
+		"label": "piano classic",
+		"file": "/models/piano-classic.glb",
+		"defaultScale": 0.52
+	},
+	{
+		"id": "piano",
+		"label": "piano",
+		"file": "/models/piano.glb",
+		"defaultScale": 0.0026
 	}
 ]

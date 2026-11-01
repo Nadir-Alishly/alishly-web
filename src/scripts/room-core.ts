@@ -72,6 +72,17 @@ export interface RoomCore {
 	readonly objects: ObjectManager;
 	/** Request a repaint. Call after ANY change to the scene: rendering is on demand. */
 	invalidate(): void;
+	/**
+	 * Repaint without re-rendering the shadow maps. For animation steps that only change the look (a highlight,
+	 * a small float); call invalidate() once when the motion has settled so the shadows catch up.
+	 */
+	requestFrame(): void;
+	/**
+	 * Runs once per frame, after the camera has been updated and before the render (so it may change the scene
+	 * and call requestFrame()). Return true to get another frame (animation in progress). Pass null to remove.
+	 * Only one hook; used by the public viewer's interaction layer.
+	 */
+	setFrameHook(hook: ((now: number) => boolean) | null): void;
 	/** Swap to another room's shell in place: tweens colours, eases the camera home. Does not touch objects. */
 	setRoom(config: RoomConfig): void;
 	/** Show these colours at once (no tween, no camera move): live editing of the current room's walls. */
@@ -831,6 +842,8 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	let dirty = true;
 	let shadowDirty = true; // the shadow maps are stale; set by anything that moves or changes a caster
 	let disposed = false;
+	let inFrame = false;
+	let frameHook: ((now: number) => boolean) | null = null;
 	let held = true; // the first render waits for the textures (see below)
 	let colorTween: { start: number; from: Color[]; to: Color[] } | null = null;
 	let cameraTween: { start: number; from: Spherical; zoom: number } | null = null;
@@ -843,7 +856,13 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	const invalidate = () => {
 		dirty = true;
 		shadowDirty = true;
-		schedule();
+		if (!inFrame) schedule(); // inside a frame (the frame hook) the render below picks it up
+	};
+
+	// Paint only: no shadow refresh. Inside a frame it just marks the frame dirty (the frame renders anyway).
+	const requestFrame = () => {
+		dirty = true;
+		if (!inFrame) schedule();
 	};
 
 	const frame = (now: number) => {
@@ -882,6 +901,15 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 		// update() applies damping and reports whether the camera moved; it also fires
 		// 'change', which re-schedules the next frame while the motion lasts.
 		const moved = controls.update();
+
+		if (frameHook) {
+			inFrame = true;
+			try {
+				if (frameHook(now)) tweening = true;
+			} finally {
+				inFrame = false;
+			}
+		}
 
 		if (moved || dirty) {
 			if (shadowDirty) {
@@ -1038,6 +1066,11 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 		canvas,
 		objects,
 		invalidate,
+		requestFrame,
+		setFrameHook(hook) {
+			frameHook = disposed ? null : hook;
+			if (hook) requestFrame();
+		},
 		setColors(colors) {
 			if (disposed) return;
 			current = { ...current, colors };
@@ -1108,6 +1141,7 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 			raf = 0;
 			colorTween = null;
 			cameraTween = null;
+			frameHook = null;
 			clearTimeout(waitTimer);
 			observer.disconnect();
 			canvas.removeEventListener('webglcontextlost', onContextLost);
