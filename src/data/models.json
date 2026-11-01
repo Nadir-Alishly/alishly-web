@@ -16,5 +16,11 @@
 		"label": "piano",
 		"file": "/models/piano.glb",
 		"defaultScale": 0.0026
+	},
+	{
+		"id": "desk-set",
+		"label": "desk set",
+		"file": "/models/desk-set.glb",
+		"defaultScale": 0.001
 	}
 ]

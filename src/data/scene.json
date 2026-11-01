@@ -31,9 +31,9 @@
           "id": "model-tall-house-plant-pep95u",
           "type": "model:tall-house-plant",
           "position": [
-            -2.5823,
+            -2.5,
             0,
-            1.5
+            2.75
           ],
           "rotation": [
             0,
@@ -50,9 +50,9 @@
           "id": "model-tall-house-plant-9kkped",
           "type": "model:tall-house-plant",
           "position": [
-            -2.5823,
+            -2.5,
             0,
-            -1.25
+            -2.5
           ],
           "rotation": [
             0,
@@ -63,6 +63,44 @@
             0.4,
             0.4,
             0.4
+          ]
+        },
+        {
+          "id": "model-piano-lbrqva",
+          "type": "model:piano",
+          "position": [
+            0.5,
+            0,
+            -2.3634
+          ],
+          "rotation": [
+            0,
+            -90,
+            0
+          ],
+          "scale": [
+            2.2,
+            2.2,
+            2.2
+          ]
+        },
+        {
+          "id": "model-desk-set-04c6z3",
+          "type": "model:desk-set",
+          "position": [
+            -2,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            90,
+            0
+          ],
+          "scale": [
+            1.2,
+            1.2,
+            1.2
           ]
         }
       ]
