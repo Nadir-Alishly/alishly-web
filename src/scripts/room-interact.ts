@@ -152,6 +152,7 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 			GLOW_LAYERS.forEach(({ px }, i) => {
 				const mesh = new Mesh(geometry, layers[i]);
 				mesh.userData.isGlowShell = true;
+				mesh.userData.noAo = true; // not an occluder (room-ao.ts)
 				mesh.castShadow = false;
 				mesh.receiveShadow = false;
 				mesh.renderOrder = 10 + i;

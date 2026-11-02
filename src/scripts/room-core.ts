@@ -53,6 +53,7 @@ import type { SceneSettings } from '../data/scene-settings';
 import type { SceneObject } from '../data/scene';
 import { createObjectManager } from './room-objects';
 import type { ObjectManager } from './room-objects';
+import type { AoOverlay } from './room-ao';
 
 export interface RoomConfig {
 	name: string;
@@ -614,6 +615,8 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	// original box). It is a scaled/moved copy of the unit box, so a new direction only moves and scales the mesh.
 	const blocker = partOf(new MeshBasicMaterial({ colorWrite: false, depthWrite: false }), sunBlockerFor(ROOM_DIMS, sunXyz()));
 	blocker.receiveShadow = false;
+	// Helper meshes that must not occlude anything in the ambient-occlusion pass (room-ao.ts hides everything with this flag).
+	for (const helper of [pane, halo, pool, dropShadow, blocker]) helper.userData.noAo = true;
 	// The sun's shadow camera must contain the whole blocker, or its back end is clipped and the sun leaks past it over the right wall.
 	const sunBounds = new Box3();
 	const placeBlocker = () => {
@@ -712,6 +715,8 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 			room?.dispose();
 			generator?.dispose();
 		}
+		// The models' own light: the (new) texture, or null when the build failed (then they stay as before).
+		objects.setModelLighting(environment?.texture ?? null, settings.objects);
 	};
 	buildEnvironment();
 
@@ -787,13 +792,14 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	};
 	// Cheap writes: uniforms and properties, no rebuild.
 	const applyLiveSettings = () => {
-		const { fill: f, floor, key, sun, glow, shadows } = settings;
+		const { fill: f, floor, key, sun, glow, shadows, objects: objectSettings } = settings;
 		renderer.toneMappingExposure = f.exposure;
 		fill.color.set(f.sky);
 		fill.groundColor.set(f.ground);
 		fill.intensity = f.intensity;
 		scene.environmentIntensity = f.envIntensity;
 		floorTop.envMapIntensity = floor.envIntensity;
+		objects.setModelLighting(environment?.texture ?? null, objectSettings);
 		for (const [light, s] of [[keyLight, key], [sunLight, sun]] as const) {
 			light.color.set(s.color);
 			light.intensity = s.intensity;
@@ -880,6 +886,52 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	let shadowDirty = true; // the shadow maps are stale; set by anything that moves or changes a caster
 	let disposed = false;
 	let inFrame = false;
+
+	// Ambient occlusion: a lazy overlay (room-ao.ts) on top of the normal render, only while settings.ao.intensity > 0.
+	// Intensity 0 never loads it and takes exactly the old render path.
+	let ao: AoOverlay | null = null;
+	let aoLoading = false;
+	let aoFailed = false; // a load/build/render error: stay on the plain render until the next context restore
+	let sceneRev = 0; // bumped by invalidate(): tells the overlay the geometry changed (the camera is tracked by the overlay)
+	const aoWanted = () => !disposed && !aoFailed && settings.ao.intensity > 0;
+	const failAo = (error: unknown) => {
+		console.warn('Could not render the ambient occlusion; continuing without it.', error);
+		aoFailed = true;
+		ao?.dispose();
+		ao = null;
+		renderer.setRenderTarget(null);
+		renderer.autoClear = true;
+		dirty = true;
+		schedule();
+	};
+	// Creates or frees the overlay to match the settings. The caller repaints (setSettings -> invalidate()).
+	const syncAo = () => {
+		if (!aoWanted()) {
+			ao?.dispose();
+			ao = null;
+			return;
+		}
+		if (ao || aoLoading) return;
+		aoLoading = true;
+		import('./room-ao').then(
+			({ createAoOverlay }) => {
+				aoLoading = false;
+				if (!aoWanted() || ao) return; // switched off (or disposed) while the chunk was loading
+				try {
+					ao = createAoOverlay(renderer, scene, camera, canvas.width, canvas.height, coarsePointer);
+				} catch (error) {
+					failAo(error);
+					return;
+				}
+				dirty = true;
+				schedule();
+			},
+			(error) => {
+				aoLoading = false;
+				failAo(error);
+			},
+		);
+	};
 	let frameHook: ((now: number, cameraMoved: boolean) => boolean) | null = null;
 	let held = true; // the first render waits for the textures (see below)
 	let colorTween: { start: number; from: Color[]; to: Color[] } | null = null;
@@ -893,6 +945,7 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	const invalidate = () => {
 		dirty = true;
 		shadowDirty = true;
+		sceneRev++;
 		if (!inFrame) schedule(); // inside a frame (the frame hook) the render below picks it up
 	};
 
@@ -955,6 +1008,13 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 				shadowDirty = false;
 			}
 			renderer.render(scene, camera);
+			if (ao && settings.ao.intensity > 0) {
+				try {
+					ao.render(settings.ao.intensity, settings.ao.radius, sceneRev); // after the main render: shadow maps are done
+				} catch (error) {
+					failAo(error);
+				}
+			}
 			dirty = false;
 		}
 		if (moved || tweening) schedule();
@@ -991,6 +1051,7 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 		if (!w || !h) return;
 		renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO));
 		renderer.setSize(w, h, false); // false: leave the canvas CSS size to the layout
+		ao?.setSize(canvas.width, canvas.height);
 		frustum(w / h);
 		dirty = true;
 		schedule();
@@ -998,12 +1059,18 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	const observer = new ResizeObserver(resize);
 	observer.observe(canvas);
 	resize();
+	syncAo();
 
 	const onContextLost = (event: Event) => event.preventDefault(); // allow restore
 	const onContextRestored = () => {
 		// GPU contents are gone: the environment map and the shadow maps must be rendered again.
 		buildEnvironment();
+		ao?.dispose(); // its targets are gone too: build it again (a failure before does not stick)
+		ao = null;
+		aoFailed = false;
+		syncAo();
 		shadowDirty = true;
+		sceneRev++;
 		dirty = true;
 		schedule();
 	};
@@ -1135,11 +1202,17 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 			const prev = settings;
 			settings = next;
 			applyLiveSettings();
+			syncAo();
+			const rev = sceneRev; // invalidate() below bumps it
 			if (next.sun.azimuth !== prev.sun.azimuth || next.sun.elevation !== prev.sun.elevation) sunDirty = true;
 			if (next.glow.poolSpread !== prev.glow.poolSpread) poolDirty = true;
 			if (next.glow.haloSpread !== prev.glow.haloSpread) haloDirty = true;
 			if (next.key.azimuth !== prev.key.azimuth || next.key.elevation !== prev.key.elevation) keyDirty = true;
 			invalidate();
+			// No setting changes the geometry the AO sees (textures, lights, glow and the blocker are not occluders), so a slider
+			// drag repaints with the cached AO: only an AO radius change (part of the overlay's key) recomputes it. If a setting ever
+			// moves or resizes non-flagged geometry (room size, wall thickness, window size), bump sceneRev for it here instead.
+			sceneRev = rev;
 		},
 		setRoom(config) {
 			if (disposed) return;
@@ -1201,7 +1274,10 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 			controls.removeEventListener('change', onControlsChange);
 			controls.removeEventListener('start', onControlsStart);
 			controls.dispose();
+			objects.setModelLighting(null, settings.objects); // drop the references before the environment is freed
 			objects.dispose();
+			ao?.dispose();
+			ao = null;
 			for (const light of lights) light.dispose(); // frees the shadow maps
 			environment?.dispose();
 			environment = null;

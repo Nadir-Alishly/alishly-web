@@ -90,6 +90,25 @@ export interface ShadowSettings {
 	normalBias: number;
 }
 
+/** Lighting of imported (GLTF) models only: the walls, floor, window and primitives are not affected. */
+export interface ObjectSettings {
+	/**
+	 * The DEFAULT strength of a model's own environment light: it prefills an object's `envLight` when /admin switches it on
+	 * (and lights the import ghost). Models without `envLight` use the scene's environment (`fill.envIntensity`) as before.
+	 */
+	envIntensity: number;
+	/** Scales the AO map baked into model files, for ALL models (aoMapIntensity = authored x this). 1 = as authored. */
+	aoIntensity: number;
+}
+
+/** Screen-space ambient occlusion over the whole scene (src/scripts/room-ao.ts). */
+export interface AoSettings {
+	/** 0 = off (the exact old render path, nothing loaded); 1 = full strength. */
+	intensity: number;
+	/** World units (metres): how far from a surface an occluder still darkens it. The room is 6.4 wide. */
+	radius: number;
+}
+
 export interface SceneSettings {
 	floor: FloorSettings;
 	wall: WallSettings;
@@ -98,11 +117,13 @@ export interface SceneSettings {
 	glow: GlowSettings;
 	key: KeySettings;
 	fill: FillSettings;
+	objects: ObjectSettings;
+	ao: AoSettings;
 	shadows: ShadowSettings;
 }
 
 export type SettingsGroup = keyof SceneSettings;
-export const SETTINGS_GROUPS: readonly SettingsGroup[] = ['floor', 'wall', 'window', 'sun', 'glow', 'key', 'fill', 'shadows'];
+export const SETTINGS_GROUPS: readonly SettingsGroup[] = ['floor', 'wall', 'window', 'sun', 'glow', 'key', 'fill', 'objects', 'ao', 'shadows'];
 
 const DEG = Math.PI / 180;
 
@@ -138,6 +159,10 @@ export const DEFAULT_SETTINGS: SceneSettings = {
 		shadowRadius: 4,
 	},
 	fill: { sky: '#e6efff', ground: '#d9cbb8', intensity: 0.6, envIntensity: 0.2, exposure: 1 },
+	// 1.2: a touch above a neutral PBR look (1), because dark glossy models (piano.glb) lose about half of it to their AO map.
+	objects: { envIntensity: 1.2, aoIntensity: 1 },
+	// Subtle on purpose (corners, seams, contact under furniture); 0.5 m reaches across a furniture crease, not across the room.
+	ao: { intensity: 0.5, radius: 0.5 },
 	shadows: { bias: -0.0004, normalBias: 0.03 },
 };
 
@@ -195,6 +220,14 @@ export const SETTING_RANGES: Record<SettingsGroup, Record<string, Range>> = {
 		intensity: { min: 0, max: 3 },
 		envIntensity: { min: 0, max: 1.5 },
 		exposure: { min: 0.3, max: 2 },
+	},
+	objects: {
+		envIntensity: { min: 0, max: 3 },
+		aoIntensity: { min: 0, max: 1 },
+	},
+	ao: {
+		intensity: { min: 0, max: 1 },
+		radius: { min: 0.05, max: 2 },
 	},
 	shadows: {
 		bias: { min: -0.005, max: 0.005 },

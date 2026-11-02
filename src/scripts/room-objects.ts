@@ -13,8 +13,11 @@
 // through addModelEntry / removeModelEntry; models imported on the page that are not deployed yet are read from memory).
 // GLTFLoader is imported lazily, so rooms without models never download it.
 import { BoxGeometry, Box3, Color, CylinderGeometry, Group, MathUtils, Mesh, MeshLambertMaterial } from 'three';
-import type { Material, Object3D, Raycaster } from 'three';
+import type { Material, Object3D, Raycaster, Texture } from 'three';
 import { models } from '../data/models';
+import { DEFAULT_SETTINGS } from '../data/scene-settings';
+import type { ObjectSettings } from '../data/scene-settings';
+import { applyModelLightingTo, recordAuthoredAo } from './model-lighting';
 import { MODEL_PREFIX, PRIMITIVE_TYPES, isPrimitiveType, modelIdOf } from '../data/scene';
 import type { ModelEntry, PrimitiveType, SceneObject, Vec3 } from '../data/scene';
 
@@ -301,6 +304,7 @@ export function instantiateModel(template: Object3D, defaultScale: number): Grou
 			const copy = m.clone();
 			const color = (copy as Partial<MeshLambertMaterial>).color;
 			if (color) copy.userData.baseColor = color.clone();
+			recordAuthoredAo(copy);
 			return copy;
 		};
 		mesh.material = Array.isArray(mesh.material) ? mesh.material.map(own) : own(mesh.material);
@@ -325,6 +329,7 @@ function setModelColor(group: Object3D, hex: string | undefined) {
 /** Shown when a model fails to load, so the object stays visible and selectable. */
 function buildMissingModel(): Group {
 	const group = new Group();
+	group.userData.noAo = true; // a wire outline: the AO normal pass would draw it as a solid cube (room-ao.ts)
 	const material = new MeshLambertMaterial({ color: '#c0392b', wireframe: true });
 	const mesh = new Mesh(new BoxGeometry(0.6, 0.6, 0.6), material);
 	mesh.castShadow = true;
@@ -360,6 +365,18 @@ export interface ObjectManager {
 	/** Re-apply transform and colour from the data. */
 	update(object: SceneObject): void;
 	remove(id: string): void;
+	/**
+	 * Model-only light: `env` (room-core's PMREM texture, owned by room-core and never disposed here; null = none), applied
+	 * per object: a model with `envLight` gets envMap + that strength, one without keeps the scene's environment; the
+	 * settings' `aoIntensity` scales every model's own AO map and `envIntensity` is the strength of tracked extras (the
+	 * import ghost). Applies now and to models that load later. Called by room-core on setup, on settings changes and when
+	 * the environment is rebuilt. update(object) re-applies one object's light (on <-> off).
+	 */
+	setModelLighting(env: Texture | null, settings: ObjectSettings): void;
+	/** Lights a model that does not live under `root` (the admin's import preview) now and on every later setModelLighting(). */
+	lightModel(model: Object3D): void;
+	/** Stops tracking a model given to lightModel() (before it is disposed). Does not touch its materials. */
+	unlightModel(model: Object3D): void;
 	get(id: string): Object3D | undefined;
 	/** Id of the object the ray hits first, or null. */
 	idAt(raycaster: Raycaster): string | null;
@@ -377,6 +394,15 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 
 	let signature: string | null = null;
 	let disposed = false;
+
+	let lightEnv: Texture | null = null;
+	let lightSettings: ObjectSettings = DEFAULT_SETTINGS.objects;
+	const extraModels = new Set<Object3D>();
+	// A model's strength is its own `envLight` (kept on its holder); null = not opted in = the scene's environment.
+	// Models outside the room (the import ghost) use the default strength.
+	const lightUp = (node: Object3D, strength: number | null) =>
+		applyModelLightingTo(node, lightEnv, strength, lightSettings.aoIntensity);
+	const lightHolder = (holder: Object3D) => lightUp(holder, (holder.userData.envLight as number | undefined) ?? null);
 
 	const applyColor = (holder: Group, object: SceneObject) => {
 		const modelId = modelIdOf(object.type);
@@ -405,6 +431,7 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 		const holder = new Group();
 		holder.userData.objectId = object.id;
 		holder.userData.type = object.type;
+		holder.userData.envLight = object.envLight;
 		holders.set(object.id, holder);
 		root.add(holder);
 
@@ -423,6 +450,7 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 				(template) => {
 					if (disposed || holders.get(object.id) !== holder) return; // removed meanwhile
 					holder.add(instantiateModel(template, defaultScale));
+					lightHolder(holder);
 					const nativeSize = template.userData.nativeSize as Vec3 | undefined;
 					if (nativeSize) holder.userData.nativeSize = nativeSize.map((n) => n * defaultScale);
 					applyColor(holder, current(object.id) ?? object);
@@ -482,9 +510,25 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 			latest.set(object.id, object);
 			applyTransform(holder, object);
 			applyColor(holder, object);
+			holder.userData.envLight = object.envLight;
+			lightHolder(holder); // on -> off and off -> on, with the authored AO restored
 			onChange();
 		},
 		remove,
+		setModelLighting(env, settings) {
+			lightEnv = env;
+			lightSettings = settings;
+			for (const holder of holders.values()) lightHolder(holder);
+			for (const model of extraModels) lightUp(model, lightSettings.envIntensity);
+		},
+		lightModel(model) {
+			if (disposed) return;
+			extraModels.add(model);
+			lightUp(model, lightSettings.envIntensity);
+		},
+		unlightModel(model) {
+			extraModels.delete(model);
+		},
 		get: (id) => holders.get(id),
 		idAt(raycaster) {
 			const hit = raycaster.intersectObjects(root.children, true)[0];
@@ -497,6 +541,8 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 		dispose() {
 			if (disposed) return;
 			for (const id of [...holders.keys()]) remove(id);
+			extraModels.clear();
+			lightEnv = null; // a reference only: room-core owns and frees the texture
 			disposed = true;
 		},
 	};

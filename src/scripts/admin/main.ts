@@ -82,6 +82,9 @@ export function mountAdmin(root: HTMLElement) {
 	const selectionLabel = byId('selection-label');
 	const colorInput = byId<HTMLInputElement>('sel-color');
 	const colorReset = byId<HTMLButtonElement>('sel-color-reset');
+	const envLightRow = byId('sel-envlight-row');
+	const envLightCheck = byId<HTMLInputElement>('sel-envlight');
+	const envLightValue = byId<HTMLInputElement>('sel-envlight-value');
 	const titleInput = byId<HTMLInputElement>('sel-title');
 	const titleCount = byId('sel-title-count');
 	const paragraphInput = byId<HTMLTextAreaElement>('sel-paragraph');
@@ -238,6 +241,11 @@ export function mountAdmin(root: HTMLElement) {
 		if (!object) return;
 		selectionLabel.textContent = catalogEntry(object.type)?.label ?? object.type;
 		colorInput.value = object.color ?? catalogEntry(object.type)?.defaultColor ?? '#ffffff';
+		// Environment light: models only; the strength field is left alone while it is being typed in.
+		envLightRow.hidden = catalogEntry(object.type)?.kind !== 'model';
+		envLightCheck.checked = object.envLight !== undefined;
+		envLightValue.disabled = object.envLight === undefined;
+		if (envLightValue !== document.activeElement) envLightValue.value = object.envLight === undefined ? '' : String(object.envLight);
 		// The note fields: never overwrite the one being typed in (unless another object was selected meanwhile).
 		const switched = object.id !== noteFieldsFor;
 		noteFieldsFor = object.id;
@@ -503,6 +511,23 @@ export function mountAdmin(root: HTMLElement) {
 	optBounds.addEventListener('change', () => editor?.setBounds(optBounds.checked));
 	colorInput.addEventListener('input', () => editor?.setSelectedColor(colorInput.value));
 	colorReset.addEventListener('click', () => editor?.setSelectedColor(null));
+	envLightCheck.addEventListener('change', () => {
+		if (!editor) return;
+		// Ticking starts from the Scene settings default; unticking removes the field again.
+		// Never below the scene's own environment intensity: that strength looks the same as "off", lower would be darker.
+		const defaults = editor.getSettings();
+		editor.setSelectedEnvLight(envLightCheck.checked ? Math.max(defaults.objects.envIntensity, defaults.fill.envIntensity) : null);
+		refreshSelection();
+	});
+	envLightValue.addEventListener('input', () => {
+		const value = envLightValue.valueAsNumber;
+		if (Number.isFinite(value)) editor?.setSelectedEnvLight(value); // empty or half-typed: wait
+	});
+	// On blur/Enter show what is stored (typed values are clamped to 0-3; an emptied field goes back to the stored strength).
+	envLightValue.addEventListener('change', () => {
+		const stored = editor?.getSelected()?.envLight;
+		envLightValue.value = stored === undefined ? '' : String(stored);
+	});
 	titleInput.addEventListener('input', () => editor?.setSelectedTitle(titleInput.value));
 	paragraphInput.addEventListener('input', () => editor?.setSelectedParagraph(paragraphInput.value));
 	duplicateButton.addEventListener('click', () => editor?.duplicateSelected());

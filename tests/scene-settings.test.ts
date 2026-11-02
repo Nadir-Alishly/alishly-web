@@ -63,7 +63,7 @@ test('every default sits inside its range, every numeric setting has a range and
 	const numeric = new Set(numericKeys().map(([g, k]) => `${g}.${k}`));
 	for (const g of SETTINGS_GROUPS) for (const k of Object.keys(SETTING_RANGES[g])) assert.ok(numeric.has(`${g}.${k}`), `range ${g}.${k} belongs to a numeric setting`);
 	for (const [g, k] of colorKeys()) assert.match(String(flat(DEFAULT_SETTINGS)[g][k]), /^#[0-9a-f]{6}$/, `${g}.${k} default colour`);
-	assert.deepEqual(SETTINGS_GROUPS, ['floor', 'wall', 'window', 'sun', 'glow', 'key', 'fill', 'shadows']);
+	assert.deepEqual(SETTINGS_GROUPS, ['floor', 'wall', 'window', 'sun', 'glow', 'key', 'fill', 'objects', 'ao', 'shadows']);
 	assert.deepEqual(Object.keys(DEFAULT_SETTINGS), [...SETTINGS_GROUPS], 'group order is canonical');
 });
 
@@ -319,7 +319,93 @@ test('window: the sparse window round trip is exact at both range ends, with no 
 	const back = parseSettings({ window: sparse.window });
 	assert.deepEqual(back.warnings, []);
 	assert.deepEqual(back.settings.window, s.window);
-	assert.deepEqual(Object.keys(DEFAULT_SETTINGS), ['floor', 'wall', 'window', 'sun', 'glow', 'key', 'fill', 'shadows']);
+	assert.deepEqual(Object.keys(DEFAULT_SETTINGS), ['floor', 'wall', 'window', 'sun', 'glow', 'key', 'fill', 'objects', 'ao', 'shadows']);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// objects: the models' own light (envIntensity, aoIntensity)
+// ---------------------------------------------------------------------------------------------------------------
+
+test('objects: defaults are envIntensity 1.2 and aoIntensity 1 (as authored); ranges are 0..3 and 0..1', () => {
+	assert.deepEqual(DEFAULT_SETTINGS.objects, { envIntensity: 1.2, aoIntensity: 1 });
+	assert.deepEqual(Object.keys(DEFAULT_SETTINGS.objects), ['envIntensity', 'aoIntensity']);
+	assert.deepEqual(SETTING_RANGES.objects.envIntensity, { min: 0, max: 3 });
+	assert.deepEqual(SETTING_RANGES.objects.aoIntensity, { min: 0, max: 1 });
+});
+
+test('objects: out-of-range values clamp to 0..3 / 0..1 with one warning each; in-range values are kept', () => {
+	const high = parseSettings({ objects: { envIntensity: 5, aoIntensity: 4 } });
+	assert.equal(high.settings.objects.envIntensity, 3);
+	assert.equal(high.settings.objects.aoIntensity, 1);
+	assert.equal(high.warnings.length, 2, high.warnings.join(' | '));
+	assert.ok(high.warnings.some((w) => w.includes('settings.objects.envIntensity')), high.warnings.join(' | '));
+	assert.ok(high.warnings.some((w) => w.includes('settings.objects.aoIntensity')), high.warnings.join(' | '));
+	const low = parseSettings({ objects: { envIntensity: -1, aoIntensity: -0.5 } });
+	assert.deepEqual(low.settings.objects, { envIntensity: 0, aoIntensity: 0 });
+	const ok = parseSettings({ objects: { envIntensity: 2.25, aoIntensity: 0.5 } });
+	assert.deepEqual(ok.settings.objects, { envIntensity: 2.25, aoIntensity: 0.5 });
+	assert.deepEqual(ok.warnings, []);
+});
+
+test('objects: sparse storage — defaults store nothing; changed values store only their key and round-trip exactly at the range ends', () => {
+	assert.equal(sparseSettings(cloneSettings(DEFAULT_SETTINGS))?.objects, undefined, 'default objects add nothing to scene.json');
+	for (const [envIntensity, aoIntensity] of [[0, 1], [3, 1], [1.2, 0], [1.2, 1], [0, 0]] as const) {
+		const s = cloneSettings(DEFAULT_SETTINGS);
+		s.objects = { envIntensity, aoIntensity };
+		const sparse = sparseSettings(s) ?? {};
+		const expected: Record<string, number> = {};
+		if (envIntensity !== DEFAULT_SETTINGS.objects.envIntensity) expected.envIntensity = envIntensity;
+		if (aoIntensity !== DEFAULT_SETTINGS.objects.aoIntensity) expected.aoIntensity = aoIntensity;
+		assert.deepEqual(sparse.objects ?? {}, expected, `stored keys for ${envIntensity}/${aoIntensity}`);
+		const back = parseSettings(JSON.parse(JSON.stringify(sparse)));
+		assert.deepEqual(back.warnings, []);
+		assert.deepEqual(back.settings.objects, s.objects, `round trip ${envIntensity}/${aoIntensity}`);
+	}
+});
+
+test('ao: defaults are intensity 0.5 and radius 0.5 m; ranges are 0..1 and 0.05..2 m; the group is ordered after objects', () => {
+	assert.deepEqual(DEFAULT_SETTINGS.ao, { intensity: 0.5, radius: 0.5 });
+	assert.deepEqual(Object.keys(DEFAULT_SETTINGS.ao), ['intensity', 'radius']);
+	assert.deepEqual(SETTING_RANGES.ao.intensity, { min: 0, max: 1 });
+	assert.deepEqual(SETTING_RANGES.ao.radius, { min: 0.05, max: 2 });
+	assert.ok(SETTINGS_GROUPS.indexOf('ao') > SETTINGS_GROUPS.indexOf('objects'));
+	assert.ok(SETTINGS_GROUPS.indexOf('ao') < SETTINGS_GROUPS.indexOf('shadows'));
+});
+
+test('ao: out-of-range values clamp (intensity 0..1, radius 0.05..2) with one warning each; in-range values are kept', () => {
+	const high = parseSettings({ ao: { intensity: 3, radius: 9 } });
+	assert.deepEqual(high.settings.ao, { intensity: 1, radius: 2 });
+	assert.equal(high.warnings.length, 2, high.warnings.join(' | '));
+	const low = parseSettings({ ao: { intensity: -1, radius: 0 } });
+	assert.deepEqual(low.settings.ao, { intensity: 0, radius: 0.05 });
+	const ok = parseSettings({ ao: { intensity: 0, radius: 1.25 } });
+	assert.deepEqual(ok.settings.ao, { intensity: 0, radius: 1.25 });
+	assert.deepEqual(ok.warnings, []);
+});
+
+test('ao: sparse storage — defaults store nothing; a changed value stores only its key and round-trips exactly at the range ends', () => {
+	assert.equal(sparseSettings(cloneSettings(DEFAULT_SETTINGS))?.ao, undefined, 'default ao adds nothing to scene.json');
+	for (const [intensity, radius] of [[0, 0.5], [1, 0.5], [0.5, 0.05], [0.5, 2], [0, 2]] as const) {
+		const s = cloneSettings(DEFAULT_SETTINGS);
+		s.ao = { intensity, radius };
+		const sparse = sparseSettings(s) ?? {};
+		const expected: Record<string, number> = {};
+		if (intensity !== DEFAULT_SETTINGS.ao.intensity) expected.intensity = intensity;
+		if (radius !== DEFAULT_SETTINGS.ao.radius) expected.radius = radius;
+		assert.deepEqual(sparse.ao ?? {}, expected, `stored keys for ${intensity}/${radius}`);
+		const back = parseSettings(JSON.parse(JSON.stringify(sparse)));
+		assert.deepEqual(back.warnings, []);
+		assert.deepEqual(back.settings.ao, s.ao, `round trip ${intensity}/${radius}`);
+	}
+});
+
+test('committed src/data/scene.json: parses with no warnings and stores no objects settings (defaults stay out of the file)', () => {
+	const text = readFileSync(new URL('../src/data/scene.json', import.meta.url), 'utf8');
+	const parsed = JSON.parse(text) as { settings?: Record<string, unknown> };
+	assert.equal(parsed.settings?.objects, undefined, 'the default objects settings are not written to scene.json');
+	const modelIds = (JSON.parse(readFileSync(new URL('../src/data/models.json', import.meta.url), 'utf8')) as { id: string }[]).map((m) => m.id);
+	const r = parseScene(parsed, { slugs: SLUGS, modelIds });
+	assert.deepEqual(r.warnings, [], r.warnings.join(' | '));
 });
 
 // ---------------------------------------------------------------------------------------------------------------

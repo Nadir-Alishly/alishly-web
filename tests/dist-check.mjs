@@ -333,6 +333,10 @@ if (adminOk) {
   check(['Scene settings', 'Floor texture', 'Window wood', 'Window glow', 'Advanced shadows', 'Reset to defaults'].every((t) => bundle.includes(t) || admin.includes(t)), 'admin: the settings panel schema (group titles incl. "Window wood", Reset to defaults) is in the admin page/bundle');  for (const id of ['settings-panel', 'room-wall-color', 'room-wall-reset']) check(new RegExp(`id="${id}"`).test(admin), `admin: has #${id}`);
   check(/<input[^>]*id="room-wall-color"[^>]*type="color"|<input[^>]*type="color"[^>]*id="room-wall-color"/.test(admin), 'admin: wall colour input is type=color');
   check(!/<script[^>]*>[^<]*Floor texture/.test(admin), 'admin: schema text is not inlined into the page');
+  // the "Objects" settings group (model lighting): its title, both slider labels and its hint are admin-only text
+  for (const label of ['Default environment light', 'Model AO map', 'Lighting for imported models only', 'Environment light', 'Ambient occlusion', 'Soft shading in corners']) {
+    check(bundle.includes(label) || admin.includes(label), `admin: the Objects group label "${label}" is in the admin page/bundle`);
+  }
   // Sidebar tabs (This room | All rooms | Save) and the "Objects in this room" list
   {
     const attr = (tag, name) => tag.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1];
@@ -476,13 +480,36 @@ while (queue.length) {
   for (const m of src.matchAll(/(?:from\s*|import\s*\(?\s*)["'`]\.\/([^"'`]+\.js)["'`]/g)) enqueue('/_astro/' + m[1]);
 }
 const reachFiles = [...reach];
+
+// phase 2: the screen-space AO (room-ao) is a LAZY chunk. It is loaded only by a dynamic import() from room-core while the AO
+// intensity is above 0, so it must NOT be in the static import graph of any public page, and room-core must reference it.
+{
+  const staticReach = new Set();
+  const q = [];
+  const addStatic = (p) => { if (!staticReach.has(p) && existsSync(join(dist, p))) { staticReach.add(p); q.push(p); } };
+  for (const f of publicPages) for (const m of blankData(read(f)).matchAll(/<(?:script|link)\b[^>]*\b(?:src|href)="(\/_astro\/[^"]+\.js)"/g)) addStatic(m[1].replace(/^\//, ''));
+  while (q.length) {
+    const p = q.pop();
+    for (const m of read(p).matchAll(/(?:\bfrom\s*|\bimport\s*)["'`]\.\/([^"'`]+\.js)["'`]/g)) addStatic('_astro/' + m[1]); // static only: no import(
+  }
+  const astroFiles = readdirSync(join(dist, '_astro'));
+  const aoChunks = astroFiles.filter((f) => /^room-ao\..*\.js$/.test(f));
+  check(aoChunks.length === 1, `exactly one room-ao chunk is emitted (${aoChunks.join(', ') || 'none'})`);
+  check(!aoChunks.some((f) => staticReach.has('_astro/' + f)), 'room-ao is NOT in the static import graph of any public page (lazy)');
+  const dynamicRefs = astroFiles.filter((f) => /\.js$/.test(f) && new RegExp(`import\\(\\s*["'\`]\\./room-ao\\.`).test(read('_astro/' + f)));
+  check(dynamicRefs.length >= 1, `a chunk loads room-ao with a dynamic import() (${dynamicRefs.join(', ') || 'none'})`);
+  const roomCore = astroFiles.filter((f) => /^room-core\..*\.js$/.test(f));
+  const sizes = roomCore.map((f) => statSync(join(dist, '_astro', f)).size);
+  // phase 1 measured 639,084 B for the room-core chunk; the budget keeps phase 2 from silently growing it.
+  check(sizes.length >= 1 && sizes.every((n) => n <= 650000), `room-core chunk size within budget (${roomCore.map((f, i) => f + ' ' + sizes[i] + ' B').join(', ')}; phase 1 = 639084 B, budget 650000 B)`);
+}
 check(reachFiles.length > 0, `public pages reach JS files (${reachFiles.length})`);
 check(!reachFiles.some((p) => /TransformControls/.test(read(p))), 'no "TransformControls" in any JS reachable from public pages');
 check(!reachFiles.some((p) => /api\.github\.com/.test(read(p))), 'no "api.github.com" in any JS reachable from public pages');
 check(!reachFiles.some((p) => /alishly-admin-token/.test(read(p))), 'no admin token storage key in any JS reachable from public pages');
 check(!reachFiles.some((p) => /index\.astro_astro_type_script/.test(p)), 'admin entry chunk is not reachable from public pages');
 // scene-settings: the admin-only panel schema (labels, hints, grouping) must not ship to the public
-for (const marker of ['Floor texture', 'Window wood', 'Advanced shadows', 'Reset to defaults', 'Shadow bias fixes speckles', "Exposure doesn't dim", 'Bump strength', 'Scene settings', 'setting-floor', 'setting-window']) {
+for (const marker of ['Floor texture', 'Window wood', 'Advanced shadows', 'Reset to defaults', 'Shadow bias fixes speckles', "Exposure doesn't dim", 'Bump strength', 'Scene settings', 'setting-floor', 'setting-window', 'Default environment light', 'Model AO map', 'Lighting for imported models only', 'Environment light', 'Ambient occlusion', 'Soft shading in corners']) {
   check(!reachFiles.some((p) => read(p).includes(marker)), `no admin settings-panel text "${marker}" in any JS reachable from public pages`);
   check(publicPages.every((f) => !blankData(read(f)).includes(marker)), `no "${marker}" in the HTML of public pages`);
 }

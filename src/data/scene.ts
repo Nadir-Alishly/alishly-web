@@ -22,6 +22,11 @@ export interface SceneObject {
 	title?: string;
 	/** Optional note (plain text, line breaks kept, <= LIMITS.maxParagraph). Only objects with one are interactive. */
 	paragraph?: string;
+	/**
+	 * Models only: the strength (0-ENV_LIGHT_MAX) of the model's own environment light (see model-lighting.ts). Omitted =
+	 * off = the scene's low environment light, the look before this feature existed.
+	 */
+	envLight?: number;
 }
 
 export interface RoomObjects {
@@ -66,6 +71,10 @@ export const ROOM_BOUNDS = {
 	min: [-ROOM_DIMS.inner, 0, -ROOM_DIMS.inner] as Vec3,
 	max: [ROOM_DIMS.half, ROOM_DIMS.wallHeight, ROOM_DIMS.half] as Vec3,
 };
+
+/** Range of `SceneObject.envLight` (the same as the scene setting `objects.envIntensity`, its prefill). */
+export const ENV_LIGHT_MIN = 0;
+export const ENV_LIGHT_MAX = 3;
 
 export const LIMITS = {
 	maxObjectsPerRoom: 500,
@@ -137,15 +146,17 @@ export function normalizeNoteText(text: string): string {
 	return text.replace(/\r\n?/g, '\n').trim();
 }
 
-/** Puts the optional keys of `object` back in the file's canonical order (color, title, paragraph), in place. */
+/** Puts the optional keys of `object` back in the file's canonical order (color, title, paragraph, envLight), in place. */
 export function restoreKeyOrder(object: SceneObject): void {
-	const { color, title, paragraph } = object;
+	const { color, title, paragraph, envLight } = object;
 	delete object.color;
 	delete object.title;
 	delete object.paragraph;
+	delete object.envLight;
 	if (color !== undefined) object.color = color;
 	if (title !== undefined) object.title = title;
 	if (paragraph !== undefined) object.paragraph = paragraph;
+	if (envLight !== undefined) object.envLight = envLight;
 }
 
 /** Reads an optional text field. Returns the value, undefined when absent/empty; pushes a note and returns undefined when invalid. */
@@ -214,6 +225,16 @@ function parseObject(raw: unknown, options: ParseOptions, notes: string[]): Scen
 	if (title !== undefined) out.title = title;
 	const paragraph = parseNoteField(raw.paragraph, 'paragraph', LIMITS.maxParagraph, notes);
 	if (paragraph !== undefined) out.paragraph = paragraph;
+	if (raw.envLight !== undefined) {
+		const light = raw.envLight;
+		if (modelId === null) notes.push('envLight only applies to models, field dropped');
+		else if (typeof light !== 'number' || !Number.isFinite(light)) notes.push('envLight must be a finite number, field dropped');
+		else {
+			const clamped = Math.min(ENV_LIGHT_MAX, Math.max(ENV_LIGHT_MIN, light));
+			if (clamped !== light) notes.push(`envLight ${light} is outside ${ENV_LIGHT_MIN}-${ENV_LIGHT_MAX}, clamped to ${clamped}`);
+			out.envLight = Math.round(clamped * 1e4) / 1e4 + 0; // 4 decimals, never -0
+		}
+	}
 	return out;
 }
 

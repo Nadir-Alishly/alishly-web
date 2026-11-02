@@ -28,6 +28,10 @@ export interface ImportPreviewOptions {
 	fit(holder: Object3D): void;
 	/** Whether `fit` is on: with `spot`, what decides where the ghost stands (relocate() rebuilds only when it changed). */
 	fitOn(): boolean;
+	/** Gives the ghost the models' own light and keeps it in sync (room-core's `objects.lightModel`). */
+	light(model: Object3D): void;
+	/** The ghost is about to be disposed (`objects.unlightModel`). */
+	unlight(model: Object3D): void;
 	/** The picture changed: repaint. Never the editor's `edit`. */
 	repaint(): void;
 }
@@ -43,6 +47,7 @@ export function createImportPreview(options: ImportPreviewOptions): ImportPrevie
 
 	const dropGhost = () => {
 		if (!ghost) return;
+		options.unlight(ghost);
 		options.scene.remove(ghost);
 		disposeInstance(ghost); // its cloned materials; the geometry belongs to the template
 		ghost = null;
@@ -59,6 +64,7 @@ export function createImportPreview(options: ImportPreviewOptions): ImportPrevie
 		const native = (template.userData.nativeSize as Vec3 | undefined) ?? null;
 		const holder = new Group();
 		holder.name = 'import-preview';
+		holder.userData.noAo = true; // a preview, not part of the room: no occlusion from it (room-ao.ts)
 		holder.add(instantiateModel(template, scale));
 		holder.traverse((node) => {
 			const mesh = node as Partial<Mesh>;
@@ -76,6 +82,7 @@ export function createImportPreview(options: ImportPreviewOptions): ImportPrevie
 		options.fit(holder);
 		holder.updateMatrixWorld(true);
 		ghost = holder;
+		options.light(holder); // envMap + intensities only; independent of ghostify() above
 		options.scene.add(holder);
 		options.repaint();
 	};

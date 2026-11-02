@@ -12,6 +12,8 @@ import { effectiveColors } from '../../data/effective-colors';
 import { pickSpot } from '../../data/import-preview';
 import { clampObjectScale } from '../../data/object-size';
 import {
+	ENV_LIGHT_MAX,
+	ENV_LIGHT_MIN,
 	LIMITS,
 	ROOM_BOUNDS,
 	cloneScene,
@@ -90,6 +92,12 @@ export interface Editor {
 	setBounds(on: boolean): void;
 	/** `null` goes back to the catalog default. */
 	setSelectedColor(hex: string | null): void;
+	/**
+	 * Models only (ignored for primitives): the selected object's own environment light. A number (clamped to 0-3) switches
+	 * it on at that strength; `null` switches it off and removes the field (the scene's environment applies again).
+	 * Previews live, emits `edit` only when the stored value changed.
+	 */
+	setSelectedEnvLight(strength: number | null): void;
 	/**
 	 * The selected object's note. Text is normalised like the file parser does (CRLF to LF, trimmed, cut at the limit);
 	 * an empty result removes the field. Emits `edit` only when the stored value changed.
@@ -208,6 +216,7 @@ export function createEditor(options: EditorOptions): Editor | null {
 	const gizmo = new TransformControls(core.camera, canvas);
 	gizmo.setMode(mode);
 	const gizmoHelper = gizmo.getHelper();
+	gizmoHelper.userData.noAo = true; // helpers never occlude (room-ao.ts)
 	core.scene.add(gizmoHelper);
 
 	const applySnap = () => {
@@ -229,6 +238,7 @@ export function createEditor(options: EditorOptions): Editor | null {
 		if (!holder) return clearHighlight();
 		if (!highlight) {
 			highlight = new BoxHelper(holder, 0x1c1917);
+			highlight.userData.noAo = true;
 			core.scene.add(highlight);
 		}
 		highlight.update();
@@ -393,6 +403,8 @@ export function createEditor(options: EditorOptions): Editor | null {
 			if (bounds) fitIntoRoom(holder);
 		},
 		fitOn: () => bounds,
+		light: (model) => core.objects.lightModel(model),
+		unlight: (model) => core.objects.unlightModel(model),
 		repaint: () => core.invalidate(),
 	});
 
@@ -543,6 +555,23 @@ export function createEditor(options: EditorOptions): Editor | null {
 			if (hex === null) delete object.color;
 			else if (COLOR_RE.test(hex)) object.color = hex.toLowerCase();
 			else return;
+			restoreKeyOrder(object);
+			objects.update(object);
+			core.invalidate();
+			emit('edit');
+		},
+
+		setSelectedEnvLight(strength) {
+			const object = selected ? find(selected) : undefined;
+			if (!object || modelIdOf(object.type) === null) return;
+			let next: number | undefined;
+			if (strength !== null) {
+				if (!Number.isFinite(strength)) return;
+				next = roundTo(Math.min(ENV_LIGHT_MAX, Math.max(ENV_LIGHT_MIN, strength)), 4);
+			}
+			if (object.envLight === next) return;
+			if (next === undefined) delete object.envLight;
+			else object.envLight = next;
 			restoreKeyOrder(object);
 			objects.update(object);
 			core.invalidate();

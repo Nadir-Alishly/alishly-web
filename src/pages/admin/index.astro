@@ -158,6 +158,27 @@ const transformFields = [
 								</div>
 								<button type="button" id="sel-color-reset" class={quiet}>Reset colour</button>
 							</div>
+							<div id="sel-envlight-row" hidden class="space-y-1">
+								<div class="flex items-center gap-3">
+									<label class="flex items-center gap-2 text-sm text-stone-700">
+										<input type="checkbox" id="sel-envlight" class="h-4 w-4 accent-stone-900" />
+										Environment light
+									</label>
+									<input
+										type="number"
+										id="sel-envlight-value"
+										min="0"
+										max="3"
+										step="0.05"
+										disabled
+										aria-label="Environment light strength"
+										class={`${field} w-24`}
+									/>
+								</div>
+								<p class="text-xs text-stone-500">
+									Brighter, glossier light for this model only. Off = the scene's normal light. The scene's environment intensity (Fill &amp; environment) looks the same as off; lower is darker.
+								</p>
+							</div>
 							<div class="space-y-1">
 								<div class="flex items-baseline justify-between">
 									<label for="sel-title" class={label}>Title (optional)</label>

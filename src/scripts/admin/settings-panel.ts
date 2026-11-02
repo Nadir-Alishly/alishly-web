@@ -119,6 +119,36 @@ const SCHEMA: GroupDef[] = [
 		],
 	},
 	{
+		group: 'objects',
+		title: 'Objects',
+		hint: 'Lighting for imported models only — walls and floor are not affected.',
+		controls: [
+			{
+				kind: 'number',
+				key: 'envIntensity',
+				label: 'Default environment light',
+				step: 0.05,
+				hint: "Models use the scene light until you tick \"Environment light\" in their Selected object panel; it starts at this value (or the scene's environment intensity, if that is higher).",
+			},
+			{
+				kind: 'number',
+				key: 'aoIntensity',
+				label: 'Model AO map',
+				step: 0.05,
+				hint: "Strength of the occlusion map baked into a model's file (all models). Lower it to lighten over-dark creases.",
+			},
+		],
+	},
+	{
+		group: 'ao',
+		title: 'Ambient occlusion',
+		hint: 'Soft shading in corners, seams and under furniture, for the whole scene. 0 turns it off.',
+		controls: [
+			{ kind: 'number', key: 'intensity', label: 'Strength', step: 0.05 },
+			{ kind: 'number', key: 'radius', label: 'Radius', step: 0.05, unit: 'units' },
+		],
+	},
+	{
 		group: 'shadows',
 		title: 'Advanced shadows',
 		hint: 'Shadow bias fixes speckles or floating shadows. Leave these alone unless you see an artefact.',
