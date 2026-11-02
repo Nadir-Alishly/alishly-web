@@ -2,7 +2,9 @@
 // back to GitHub), head()/blobSha with a .glb over the upload cap, per-request validators (injected, and through a
 // mock Vite SSR runner with fallback), 500 text without absolute paths, stale-temp sweep, upload idle timeout.
 // main.ts itself (probeDevBackend / guarded / useDiskLayout) is DOM + import.meta.env code and is NOT Node-testable;
-// it is covered by the browser pass in tester-r2.md. Temp repo roots: tests/.tmp-local-save-r2-*, removed in after().
+// it is covered by the browser pass in tester-r2.md. Task local-folder: all data lives in local/ (wire paths unchanged),
+// so the huge-glb / EACCES / sweep / idle-timeout tests look at local/ and local/models. Temp repo roots:
+// tests/.tmp-local-save-r2-*, removed in after().
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -18,6 +20,7 @@ import { GITHUB_WORDING } from '../src/scripts/admin/backend.ts';
 import { MAX_MODEL_BYTES, validateGlb } from '../src/scripts/admin/model-file.ts';
 import { emptyScene, serializeScene, validateScene, parseScene, parseModels, modelIdOf } from '../src/data/scene.ts';
 import { makeBoxGlb } from './helpers/gltf-fixtures.ts';
+import { seedRepo } from './helpers/local-repo.ts';
 import { makeHarness, ORIGIN, PORT } from './helpers/local-save-http.ts';
 
 const SLUGS = ['elnur', 'sabina', 'nadir', 'chinara', 'alibala', 'elkhan', 'fazil'];
@@ -41,10 +44,7 @@ after(async () => {
 
 async function makeRepo(slugs: readonly string[] = SLUGS) {
 	const root = path.join(base, `repo${n++}`);
-	await mkdir(path.join(root, 'src/data'), { recursive: true });
-	await mkdir(path.join(root, 'public/models'), { recursive: true });
-	await writeFile(path.join(root, SCENE_PATH), sceneText(slugs));
-	await writeFile(path.join(root, MODELS_PATH), '[]\n');
+	await seedRepo(root, { scene: sceneText(slugs), models: '[]\n' });
 	return root;
 }
 const gitSha = (file: string) => execFileSync('git', ['hash-object', file]).toString().trim();
@@ -98,17 +98,17 @@ test('probeLocal against the real middleware is ok; against a server without the
 	assert.equal(r.ok, false);
 });
 
-test('wording: the disk modelAdded text says "write it to disk" (no "publish"); the GitHub text is unchanged', () => {
+test('wording: the local modelAdded text says "write it to local/models" (no "publish", no "commit"); the GitHub text is unchanged', () => {
 	const disk = LOCAL_WORDING.modelAdded('Chair');
-	assert.match(disk, /click Save models to write it to disk/);
-	assert.doesNotMatch(disk, /publish|github/i);
+	assert.match(disk, /click Save models to write it to local\/models/);
+	assert.doesNotMatch(disk, /publish|github|commit|push/i);
 	assert.match(GITHUB_WORDING.modelAdded('Chair'), /publish/);
 });
 
 // ---- head() / blobSha with a .glb over the upload cap ------------------------------------------------------------
 
 async function withHugeGlb(root: string, id = 'huge') {
-	const file = path.join(root, 'public/models', `${id}.glb`);
+	const file = path.join(root, 'local/models', `${id}.glb`);
 	const big = Buffer.alloc(MAX_MODEL_BYTES + 10, 7);
 	await writeFile(file, big);
 	return { file, big };
@@ -194,7 +194,7 @@ test('validators that fail to load: 500 "could not load the scene rules (see the
 			return true;
 		});
 	}
-	assert.deepEqual(await readdir(path.join(root, 'public/models')), []);
+	assert.deepEqual(await readdir(path.join(root, 'local/models')), []);
 });
 
 // Plugin: validators come through server.environments.ssr.runner.import, per request; runner failure falls back.
@@ -268,7 +268,7 @@ test('commit failing part-way (EACCES): 500 names only the error code; response 
 	const header = Buffer.from(JSON.stringify({ expectedHead: head, changes: [{ path: 'public/models/chair.glb', op: 'write', size: glb.byteLength }] }));
 	const len = Buffer.alloc(4);
 	len.writeUInt32BE(header.byteLength, 0);
-	const dir = path.join(root, 'public/models');
+	const dir = path.join(root, 'local/models');
 	await chmod(dir, 0o555);
 	try {
 		const res = await h.fetch('/__local-save/commit', { method: 'POST', headers: { ...G, 'content-type': 'application/octet-stream' }, body: Buffer.concat([len, header, glb]) });
@@ -291,7 +291,7 @@ test('PUT file failing with a raw fs error (EACCES): generic 500 without paths o
 	const root = await makeRepo();
 	const h = await makeHarness({ root });
 	await h.ready();
-	const dir = path.join(root, 'public/models');
+	const dir = path.join(root, 'local/models');
 	await chmod(dir, 0o555);
 	try {
 		const res = await h.fetch('/__local-save/file?path=public%2Fmodels%2Fchair.glb', { method: 'PUT', headers: { ...G, 'content-type': 'application/octet-stream' }, body: new Uint8Array(GLB) });
@@ -313,18 +313,21 @@ async function plant(root: string, rel: string, ageMs: number) {
 	await utimes(file, when, when);
 }
 
-test('sweepStaleTemp: removes only our own ".<name>.<12 hex>.tmp" files older than 60 s, in src/data and public/models', async () => {
+test('sweepStaleTemp: removes only our own ".<name>.<12 hex>.tmp" files older than 60 s, in local/ and local/models (never src/data or public/models)', async () => {
 	const root = await makeRepo();
 	const marks: string[] = [];
 	const store = createLocalSave({ root, slugs: SLUGS, onWrite: (p: string) => marks.push(p) });
-	const old = ['src/data/.scene.json.0123456789ab.tmp', 'public/models/.chair.glb.ffffffffffff.tmp'];
+	const old = ['local/.scene.json.0123456789ab.tmp', 'local/models/.chair.glb.ffffffffffff.tmp'];
 	const keep = [
-		'src/data/.scene.json.0123456789ac.tmp', // fresh (in progress)
-		'src/data/.scene.json.tmp', // not our pattern
-		'src/data/.notes.0123456789ab.txt', // wrong extension
-		'src/data/scene.json.0123456789ab.tmp', // no leading dot
-		'public/models/.chair.glb.ZZZZZZZZZZZZ.tmp', // not hex
-		'public/models/.chair.glb.0123456789.tmp', // 10 hex
+		'local/.scene.json.0123456789ac.tmp', // fresh (in progress)
+		'local/.scene.json.tmp', // not our pattern
+		'local/.notes.0123456789ab.txt', // wrong extension
+		'local/scene.json.0123456789ab.tmp', // no leading dot
+		'local/models/.chair.glb.ZZZZZZZZZZZZ.tmp', // not hex
+		'local/models/.chair.glb.0123456789.tmp', // 10 hex
+		// the old (committed) locations are no longer swept: the dev server writes nothing there any more
+		'src/data/.scene.json.0123456789ab.tmp',
+		'public/models/.chair.glb.ffffffffffff.tmp',
 	];
 	for (const f of old) await plant(root, f, 5 * 60_000);
 	await plant(root, keep[0], 1000);
@@ -333,27 +336,28 @@ test('sweepStaleTemp: removes only our own ".<name>.<12 hex>.tmp" files older th
 	assert.deepEqual([...removed].sort(), [...old].sort());
 	for (const f of old) await assert.rejects(readFile(path.join(root, f)), { code: 'ENOENT' });
 	for (const f of keep) assert.equal(await readFile(path.join(root, f), 'utf8'), 'junk', `${f} must stay`);
-	assert.equal(await readFile(path.join(root, SCENE_PATH), 'utf8'), sceneText(), 'data files untouched');
+	assert.equal(await readFile(path.join(root, 'local/scene.json'), 'utf8'), sceneText(), 'data files untouched');
 	assert.ok(old.every((f) => marks.includes(path.join(root, f))), 'removals are marked via onWrite so the watcher event is not a reload');
 });
 
 test('sweepStaleTemp: does not follow symlinks / directories with a tmp-like name, and survives missing directories', async () => {
 	const root = await makeRepo();
-	await mkdir(path.join(root, 'src/data/.dir.0123456789ab.tmp'));
-	await rm(path.join(root, 'public'), { recursive: true });
+	await mkdir(path.join(root, 'local/.scene.json.0123456789ab.tmp')); // a directory with an own-looking name
+	await rm(path.join(root, 'local/models'), { recursive: true });
 	const store = createLocalSave({ root, slugs: SLUGS });
 	assert.deepEqual(await store.sweepStaleTemp(), []);
-	assert.ok((await readdir(path.join(root, 'src/data'))).includes('.dir.0123456789ab.tmp'));
+	assert.ok((await readdir(path.join(root, 'local'))).includes('.scene.json.0123456789ab.tmp'));
+	assert.equal(await readdir(path.join(root, 'local/models')).catch(() => null), null, 'the sweep does not create local/models');
 });
 
 test('plugin start sweeps stale temp files once and logs them', async () => {
 	const root = await makeRepo();
-	await plant(root, 'src/data/.models.json.abcdefabcdef.tmp', 10 * 60_000);
+	await plant(root, 'local/.models.json.abcdefabcdef.tmp', 10 * 60_000);
 	const h = await makeHarness({ root });
 	await h.ready();
 	for (let i = 0; i < 50 && !h.logs.some((l) => /removed stale temp files/.test(l.text)); i++) await new Promise((r) => setTimeout(r, 10));
-	assert.ok(h.logs.some((l) => /removed stale temp files: src\/data\/\.models\.json\.abcdefabcdef\.tmp/.test(l.text)));
-	assert.deepEqual((await readdir(path.join(root, 'src/data'))).filter((f) => f.endsWith('.tmp')), []);
+	assert.ok(h.logs.some((l) => /removed stale temp files: local\/\.models\.json\.abcdefabcdef\.tmp/.test(l.text)));
+	assert.deepEqual((await readdir(path.join(root, 'local'))).filter((f) => f.endsWith('.tmp')), []);
 });
 
 // ---- upload idle timeout ---------------------------------------------------------------------------------------
@@ -381,9 +385,12 @@ async function stalledUpload(t: import('node:test').TestContext, sendFirstChunk:
 			end(text: string) { resolve({ status: res.statusCode, headers: res.headers, text, destroyed: () => destroyed }); queueMicrotask(() => res.emit('finish')); },
 		});
 		Promise.resolve(handlers[0](req, res, () => {})).catch(() => {});
-		// wait until the handler has armed its idle timer, then jump past it
+		// Wait until the handler has really armed its idle timer, then jump past it. "Armed" = it is reading the body, i.e.
+		// it has attached its 'data' listener (this takes a few real fs round trips: the old fixed "20 setImmediate" wait
+		// raced with them and could tick BEFORE the timer existed, which then never fired and the test hung).
 		(async () => {
-			for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+			while (body.listenerCount('data') === 0) await new Promise((r) => setImmediate(r));
+			for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); // the first chunk (if any) re-arms the timer
 			t.mock.timers.tick(29_000);
 			for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
 			t.mock.timers.tick(1_500);
@@ -392,18 +399,20 @@ async function stalledUpload(t: import('node:test').TestContext, sendFirstChunk:
 	return { out, root };
 }
 
-test('upload idle timeout: a client that sends nothing for 30 s gets 408 "stalled", the connection is dropped, nothing is written', async (t) => {
+// A hard per-test timeout: a regression in the timer logic fails the test instead of hanging `node --test tests/`.
+test('upload idle timeout: a client that sends nothing for 30 s gets 408 "stalled", the connection is dropped, nothing is written', { timeout: 15_000 }, async (t) => {
 	const { out, root } = await stalledUpload(t, false);
 	assert.equal(out.status, 408);
 	assert.match(out.text, /stalled/);
 	assert.equal(out.headers.Connection, 'close');
 	await new Promise((r) => setImmediate(r));
 	assert.equal(out.destroyed(), true, 'req.destroy() after the answer');
-	assert.deepEqual(await readdir(path.join(root, 'public/models')), []);
+	assert.deepEqual(await readdir(path.join(root, 'local/models')), []);
+	assert.deepEqual((await readdir(path.join(root, 'local'))).filter((f) => f.endsWith('.tmp')), []);
 });
 
-test('upload idle timeout: also fires after a first chunk (the timer is re-armed per chunk, not per request); partial data is discarded', async (t) => {
+test('upload idle timeout: also fires after a first chunk (the timer is re-armed per chunk, not per request); partial data is discarded', { timeout: 15_000 }, async (t) => {
 	const { out, root } = await stalledUpload(t, true);
 	assert.equal(out.status, 408);
-	assert.deepEqual(await readdir(path.join(root, 'public/models')), []);
+	assert.deepEqual(await readdir(path.join(root, 'local/models')), []);
 });

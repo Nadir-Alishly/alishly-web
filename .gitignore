@@ -23,3 +23,6 @@ pnpm-debug.log*
 
 # jetbrains setting folder
 .idea/
+
+# dev-only local data (scene, models, GLBs) used by `npm run dev` instead of src/data and public/models
+/local/

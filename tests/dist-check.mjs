@@ -1,5 +1,6 @@
 // Read-only check of the built site in dist/. Run after `npm run build`: node tests/dist-check.mjs
-import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync, lstatSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 const dist = new URL('../dist/', import.meta.url).pathname;
@@ -541,6 +542,13 @@ check(publicPages.every((f) => ![...blankData(read(f)).matchAll(/<script\b[^>]*>
     'Loaded the latest scene from disk', 'model library on disk', 'public/models and src/data/models.json',
     // fix round 1
     'probeLocal', 'probeDevBackend', 'write it to disk', 'Nothing was saved', 'another server on this port', 'npm run dev',
+    // task local-folder: the dev data lives in local/ and the dev banner says so; none of that may reach production
+    'using local/', 'not in git', 'differs from committed', 'dev-local-banner', 'dev-local-differs', 'fetchDiffers', 'refreshLocalBanner',
+    'local/scene.json', 'local/models', 'saving to local/', 'Saved to local/', 'in local/ was already up to date', 'disk (local/)',
+    'alishly-local-save head', 'cannot read local/', 'write API disabled', 'LOCAL_MODELS_DIR', 'ensureLocal',
+    // task local-folder round 2: the red "invalid local data" box and the save blocking
+    'dev-local-problem', 'Saving is blocked', 'checkLocalData', 'showLocalProblems', 'localProblems', 'localBlockMessage',
+    'cannot be used as a scene', 'is not a list of models', 'has entries that cannot be read', 'Fix the file in local/', 'fix the file, then click',
   ];
   const files = walk(dist).filter((f) => !/\.(glb|png|jpe?g|webp|woff2?|ico)$/i.test(f));
   const hits = [];
@@ -553,6 +561,10 @@ check(publicPages.every((f) => ![...blankData(read(f)).matchAll(/<script\b[^>]*>
   if (existsSync(join(dist, 'admin/index.html'))) {
     const admin = read('admin/index.html');
     check(!/dev-save-note/.test(admin) && !/Dev:\s*saving/.test(admin) && !/Save to disk/.test(admin), 'admin: production HTML has no dev-save-note / "Dev: saving" / "Save to disk" markup');
+    // task local-folder: no dev banner markup or wording in the production admin page
+    check(!/dev-local-problem/.test(admin) && !/Saving is blocked|fix the file, then click/i.test(admin), 'admin: production HTML has no dev-local-problem box or "Saving is blocked" wording');
+    check(!/dev-local-banner|dev-local-differs/.test(admin) && !/using local\//.test(admin) && !/not in git/i.test(admin) && !/differs from committed/i.test(admin), 'admin: production HTML has no dev-local banner ("using local/", "not in git", "differs from committed")');
+    check(!/\blocal\/(?:scene|models)/.test(admin) && !/Dev:/.test(admin), 'admin: production HTML mentions neither local/ files nor a "Dev:" note');
     check(/<h2[^>]*id="github-heading"[^>]*>Save to GitHub<\/h2>/.test(admin) && /<button[^>]*id="gh-save"[^>]*>Save to GitHub<\/button>/.test(admin), 'admin: production Save panel still says "Save to GitHub" (heading and button)');
     check(/id="gh-token"/.test(admin) && /id="gh-message"/.test(admin) && /id="github-settings"/.test(admin) && !/\bid="gh-token"[^>]*\bhidden\b/.test(admin), 'admin: the GitHub token / commit-message / repository-settings inputs are all present and not hidden in production');
     // fix round 1: the inert data-github-only markers exist in production and nothing hides them
@@ -561,6 +573,44 @@ check(publicPages.every((f) => ![...blankData(read(f)).matchAll(/<script\b[^>]*>
     // the admin script still holds the GitHub wording (it is the default backend)
     const adminJs = walk(join(dist, '_astro')).filter((f) => f.endsWith('.js')).map((f) => readFileSync(f, 'utf8'));
     check(adminJs.some((t) => t.includes('Saved — site rebuilding') || t.includes('site rebuilding')), 'admin JS: the GitHub "site rebuilding" wording is still shipped');
+  }
+}
+// Task local-folder: `dist` holds no data from local/. A build must never read local/ (the dev plugin is `apply: 'serve'`), so the
+// models shipped are exactly the committed public/models and the pages show the committed scene (the per-room checks above
+// already compare each page against the COMMITTED scene.json). If a local/ folder exists next to this checkout (the developer's
+// dev data) its distinctive content must be absent from dist. The stronger check, with a sentinel local/ built in an isolated
+// copy of the repo, is tests/dist-local-sentinel.mjs.
+{
+  const repoRoot = new URL('../', import.meta.url).pathname;
+  const sha = (f) => createHash('sha256').update(readFileSync(f)).digest('hex');
+  const names = (d) => (existsSync(d) ? readdirSync(d).sort() : []);
+  // 1. dist/models == public/models, byte for byte
+  const pub = names(join(repoRoot, 'public/models'));
+  const out = names(join(dist, 'models'));
+  check(JSON.stringify(out) === JSON.stringify(pub), `dist/models has exactly the files of public/models (${out.length}/${pub.length})${JSON.stringify(out) === JSON.stringify(pub) ? '' : `: dist [${out}] vs public [${pub}]`}`);
+  check(pub.every((f) => out.includes(f) && sha(join(dist, 'models', f)) === sha(join(repoRoot, 'public/models', f))), 'dist/models files are byte-identical to public/models');
+  // 2. no local/ folder or file in dist
+  const strayLocal = walk(dist).map((f) => f.slice(dist.length)).filter((f) => /(^|\/)local(\/|$)/.test(f) || /^local[-_.]/i.test(f.split('/').pop()));
+  check(strayLocal.length === 0, `dist has no local/ folder or local* file${strayLocal.length ? `: ${strayLocal.join(', ')}` : ''}`);
+  // 3. content of an existing local/ is absent from dist
+  const localDir = join(repoRoot, 'local');
+  if (existsSync(localDir) && lstatSync(localDir).isDirectory()) {
+    const readJson = (f) => { try { return JSON.parse(readFileSync(f, 'utf8')); } catch { return null; } };
+    const committedIds = new Set(modelIds);
+    const localModels = readJson(join(localDir, 'models.json'));
+    const localIds = (Array.isArray(localModels) ? localModels : []).map((m) => m?.id).filter((id) => typeof id === 'string' && !committedIds.has(id));
+    const localGlbs = names(join(localDir, 'models')).filter((f) => f.endsWith('.glb') && !pub.includes(f));
+    const distText = walk(dist).filter((f) => !/\.(glb|png|jpe?g|webp|woff2?|ico)$/i.test(f)).map((f) => [f, readFileSync(f, 'utf8')]);
+    const leaked = [];
+    for (const id of localIds) for (const [f, t] of distText) if (t.includes(id)) leaked.push(`${f.slice(dist.length)} ~ model id ${id}`);
+    for (const f of localGlbs) if (out.includes(f)) leaked.push(`dist/models/${f}`);
+    const localScene = readJson(join(localDir, 'scene.json'));
+    const localObjectIds = Object.values(localScene?.rooms ?? {}).flatMap((room) => (room?.objects ?? []).map((o) => o?.id)).filter((id) => typeof id === 'string' && id.length >= 6);
+    const committedObjectIds = new Set(Object.values(sceneRaw?.rooms ?? {}).flatMap((room) => (room?.objects ?? []).map((o) => o?.id)));
+    for (const id of localObjectIds.filter((i) => !committedObjectIds.has(i))) for (const [f, t] of distText) if (t.includes(id)) leaked.push(`${f.slice(dist.length)} ~ object id ${id}`);
+    check(leaked.length === 0, `dist contains nothing that only exists in the local/ folder (${localIds.length} model ids, ${localGlbs.length} glbs, ${localObjectIds.length} object ids checked)${leaked.length ? `: ${leaked.slice(0, 6).join('; ')}` : ''}`);
+  } else {
+    check(true, 'no local/ folder next to this checkout, so there is no local data that could have leaked (see tests/dist-local-sentinel.mjs for the sentinel build)');
   }
 }
 // Plan: unknown-slug / admin must not leak into the page set

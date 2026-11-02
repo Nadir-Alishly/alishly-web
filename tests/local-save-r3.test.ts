@@ -2,6 +2,7 @@
 // validators (a raised/lowered cap or a changed id rule applies on the next request, no source file is edited — the
 // "live" modules are injected, or served by a mock SSR runner); (2) the stale-temp sweep matches ONLY the exact temp
 // names atomicWrite creates, in the right directory, as regular files, in a real (non-symlinked) directory.
+// Task local-folder: the data lives in local/ (wire paths unchanged), so the files, caps and sweeps are checked there.
 // Temp repo roots: tests/.tmp-local-save-r3-*, removed in after().
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,6 +13,7 @@ import { LocalSaveError, createLocalSave, gitBlobSha, parseCommitBody, HARD_MAX_
 import { MAX_MODEL_BYTES, validateGlb } from '../src/scripts/admin/model-file.ts';
 import { emptyScene, serializeScene, validateScene, parseScene, parseModels, modelIdOf } from '../src/data/scene.ts';
 import { makeBoxGlb } from './helpers/gltf-fixtures.ts';
+import { seedRepo } from './helpers/local-repo.ts';
 import { makeHarness } from './helpers/local-save-http.ts';
 
 const SLUGS = ['elnur', 'sabina', 'nadir', 'chinara', 'alibala', 'elkhan', 'fazil'];
@@ -31,10 +33,7 @@ after(async () => {
 
 async function makeRepo() {
 	const root = path.join(base, `repo${n++}`);
-	await mkdir(path.join(root, 'src/data'), { recursive: true });
-	await mkdir(path.join(root, 'public/models'), { recursive: true });
-	await writeFile(path.join(root, SCENE_PATH), serializeScene(emptyScene(SLUGS)));
-	await writeFile(path.join(root, MODELS_PATH), '[]\n');
+	await seedRepo(root, { scene: serializeScene(emptyScene(SLUGS)), models: '[]\n' });
 	return root;
 }
 
@@ -105,7 +104,7 @@ test('writeFile: a RAISED live cap accepts an upload that the default cap refuse
 	const r = await store.writeFile('public/models/big.glb', big, null);
 	assert.equal(r.bytes, big.byteLength);
 	assert.equal(r.sha, gitBlobSha(big));
-	assert.equal((await lstat(path.join(root, 'public/models/big.glb'))).size, big.byteLength);
+	assert.equal((await lstat(path.join(root, 'local/models/big.glb'))).size, big.byteLength);
 	// and a body over even the raised cap is still refused
 	await rejectsWith(store.writeFile('public/models/bigger.glb', blob(MAX_MODEL_BYTES + 2001), null), '413 too-large');
 });
@@ -133,7 +132,7 @@ test('the cap applies to scene.json / models.json bodies too (same per-file rule
 test('readText: files larger than the live cap are 413, a raised cap serves them', async () => {
 	const { store, live, root } = await liveStore();
 	const text = serializeScene(emptyScene(SLUGS));
-	await writeFile(path.join(root, SCENE_PATH), text);
+	await writeFile(path.join(root, 'local/scene.json'), text);
 	live.maxModelBytes = Buffer.byteLength(text) - 1;
 	await rejectsWith(store.readText(SCENE_PATH), '413 too-large');
 	live.maxModelBytes = Buffer.byteLength(text);
@@ -221,7 +220,7 @@ test('HTTP: a raised MAX_MODEL_BYTES (served by the runner) lets a bigger upload
 	const raised = await runnerHarness({ cap: MAX_MODEL_BYTES + 10_000, accept: true });
 	const res = await putGlb(raised.h, 'big', big);
 	assert.equal(res.status, 200);
-	assert.equal((await lstat(path.join(raised.root, 'public/models/big.glb'))).size, big.byteLength);
+	assert.equal((await lstat(path.join(raised.root, 'local/models/big.glb'))).size, big.byteLength);
 	// beyond the raised cap: refused (declared length) and the connection is closed
 	const over = await putGlb(raised.h, 'bigger', blob(MAX_MODEL_BYTES + 10_001));
 	assert.equal(over.status, 413);
@@ -235,7 +234,7 @@ test('HTTP: a LOWERED cap refuses a body above it before reading it; a body at t
 	const r = await putGlb(h, 'chair', tooBig);
 	assert.equal(r.status, 413);
 	assert.equal(r.headers.get('connection'), 'close');
-	assert.deepEqual((await readdir(path.join(root, 'public/models'))).filter((f) => !f.startsWith('.')), []);
+	assert.deepEqual((await readdir(path.join(root, 'local/models'))).filter((f) => !f.startsWith('.')), []);
 	assert.equal((await putGlb(h, 'chair', GLB)).status, 200);
 });
 
@@ -275,10 +274,10 @@ async function plant(root: string, rel: string, ageMs = OLD, content = 'junk') {
 const exists = (p: string) => lstat(p).then(() => true, () => false);
 const HEX = '0123456789ab';
 
-test('sweep: removes exactly .scene.json / .models.json temps in src/data and .<valid-id>.glb temps in public/models', async () => {
+test('sweep: removes exactly .scene.json / .models.json temps in local/ and .<valid-id>.glb temps in local/models', async () => {
 	const root = await makeRepo();
 	const store = createLocalSave({ root, slugs: SLUGS });
-	const own = [`src/data/.scene.json.${HEX}.tmp`, `src/data/.models.json.${HEX}.tmp`, `public/models/.chair.glb.${HEX}.tmp`, `public/models/.Tall_House-9.glb.${HEX}.tmp`];
+	const own = [`local/.scene.json.${HEX}.tmp`, `local/.models.json.${HEX}.tmp`, `local/models/.chair.glb.${HEX}.tmp`, `local/models/.Tall_House-9.glb.${HEX}.tmp`];
 	for (const f of own) await plant(root, f);
 	const removed = await store.sweepStaleTemp();
 	assert.deepEqual([...removed].sort(), [...own].sort());
@@ -289,53 +288,57 @@ test('sweep: decoys with similar names are left alone (wrong file, wrong dir, wr
 	const root = await makeRepo();
 	const store = createLocalSave({ root, slugs: SLUGS });
 	const decoys = [
-		// src/data: only scene.json / models.json temps
-		`src/data/.other.json.${HEX}.tmp`,
-		`src/data/.scene.json.${HEX}.tmp.bak`,
-		`src/data/..scene.json.${HEX}.tmp`,
-		`src/data/.scene.jsonx.${HEX}.tmp`,
-		`src/data/.scene.json.${HEX.toUpperCase()}.tmp`, // upper-case hex is not what randomBytes().toString('hex') makes
-		`src/data/.scene.json.${HEX}x.tmp`, // 13 chars
-		`src/data/.scene.json.${HEX.slice(1)}.tmp`, // 11 chars
-		`src/data/.scene.json.${HEX}.TMP`,
-		`src/data/scene.json.${HEX}.tmp`, // no leading dot
-		`src/data/.chair.glb.${HEX}.tmp`, // a glb temp does not belong in src/data
-		`src/data/.scene.json.${HEX.replace('a', 'g')}.tmp`, // not hex
-		// public/models: only .<id>.glb temps
-		`public/models/.scene.json.${HEX}.tmp`, // a json temp does not belong in public/models
-		`public/models/.models.json.${HEX}.tmp`,
-		`public/models/.chair.${HEX}.tmp`, // no .glb
-		`public/models/.chair.gltf.${HEX}.tmp`,
-		`public/models/.bad id.glb.${HEX}.tmp`, // space: not a model id
-		`public/models/.bad.id.glb.${HEX}.tmp`, // dot: not a model id (id would be "bad.id")
-		`public/models/.chair.glb.${HEX}`, // no .tmp
-		`public/models/chair.glb.${HEX}.tmp`, // no leading dot
-		`public/models/.chair.glb.zzzzzzzzzzzz.tmp`,
+		// local/: only scene.json / models.json temps
+		`local/.other.json.${HEX}.tmp`,
+		`local/.scene.json.${HEX}.tmp.bak`,
+		`local/..scene.json.${HEX}.tmp`,
+		`local/.scene.jsonx.${HEX}.tmp`,
+		`local/.scene.json.${HEX.toUpperCase()}.tmp`, // upper-case hex is not what randomBytes().toString('hex') makes
+		`local/.scene.json.${HEX}x.tmp`, // 13 chars
+		`local/.scene.json.${HEX.slice(1)}.tmp`, // 11 chars
+		`local/.scene.json.${HEX}.TMP`,
+		`local/scene.json.${HEX}.tmp`, // no leading dot
+		`local/.chair.glb.${HEX}.tmp`, // a glb temp does not belong in local/
+		`local/.scene.json.${HEX.replace('a', 'g')}.tmp`, // not hex
+		// local/models: only .<id>.glb temps
+		`local/models/.scene.json.${HEX}.tmp`, // a json temp does not belong in local/models
+		`local/models/.models.json.${HEX}.tmp`,
+		`local/models/.chair.${HEX}.tmp`, // no .glb
+		`local/models/.chair.gltf.${HEX}.tmp`,
+		`local/models/.bad id.glb.${HEX}.tmp`, // space: not a model id
+		`local/models/.bad.id.glb.${HEX}.tmp`, // dot: not a model id (id would be "bad.id")
+		`local/models/.chair.glb.${HEX}`, // no .tmp
+		`local/models/chair.glb.${HEX}.tmp`, // no leading dot
+		`local/models/.chair.glb.zzzzzzzzzzzz.tmp`,
 		// plain user files that must never be touched
-		'src/data/notes.txt',
-		'public/models/readme.md',
+		'local/notes.txt',
+		'local/models/readme.md',
 		// other directories with the exact own name
 		`src/.scene.json.${HEX}.tmp`,
 		`public/.chair.glb.${HEX}.tmp`,
+		// the OLD (committed) locations are not swept any more: dev writes nothing there
+		`src/data/.scene.json.${HEX}.tmp`,
+		`src/data/.models.json.${HEX}.tmp`,
+		`public/models/.chair.glb.${HEX}.tmp`,
 		`.scene.json.${HEX}.tmp`,
-		`public/models/sub/.chair.glb.${HEX}.tmp`,
-		`src/data/sub/.scene.json.${HEX}.tmp`,
+		`local/models/sub/.chair.glb.${HEX}.tmp`,
+		`local/sub/.scene.json.${HEX}.tmp`,
 	];
 	for (const f of decoys) await plant(root, f);
 	assert.deepEqual(await store.sweepStaleTemp(), []);
 	for (const f of decoys) assert.equal(await readFile(path.join(root, f), 'utf8'), 'junk', `${f} must be untouched`);
 	// the real data files survive too
-	assert.equal(await exists(path.join(root, SCENE_PATH)), true);
-	assert.equal(await exists(path.join(root, MODELS_PATH)), true);
+	assert.equal(await exists(path.join(root, 'local/scene.json')), true);
+	assert.equal(await exists(path.join(root, 'local/models.json')), true);
 });
 
 test('sweep: a fresh own temp (younger than 60 s) stays; one just over the threshold goes', async () => {
 	const root = await makeRepo();
 	const store = createLocalSave({ root, slugs: SLUGS });
-	await plant(root, `src/data/.scene.json.${HEX}.tmp`, 30_000);
-	await plant(root, `src/data/.models.json.${HEX}.tmp`, 61_000);
-	assert.deepEqual(await store.sweepStaleTemp(), [`src/data/.models.json.${HEX}.tmp`]);
-	assert.equal(await exists(path.join(root, `src/data/.scene.json.${HEX}.tmp`)), true);
+	await plant(root, `local/.scene.json.${HEX}.tmp`, 30_000);
+	await plant(root, `local/.models.json.${HEX}.tmp`, 61_000);
+	assert.deepEqual(await store.sweepStaleTemp(), [`local/.models.json.${HEX}.tmp`]);
+	assert.equal(await exists(path.join(root, `local/.scene.json.${HEX}.tmp`)), true);
 });
 
 test('sweep: non-regular files with an own-looking name are left alone (directory, symlink to a file, dangling symlink, symlink to outside)', async () => {
@@ -343,29 +346,29 @@ test('sweep: non-regular files with an own-looking name are left alone (director
 	const outside = path.join(base, `outside${n++}`);
 	await mkdir(outside, { recursive: true });
 	await writeFile(path.join(outside, 'precious.txt'), 'keep me');
-	await mkdir(path.join(root, `src/data/.scene.json.${HEX}.tmp`)); // a directory
+	await mkdir(path.join(root, `local/.scene.json.${HEX}.tmp`)); // a directory
 	await writeFile(path.join(root, 'target.txt'), 'target');
-	await symlink(path.join(root, 'target.txt'), path.join(root, `src/data/.models.json.${HEX}.tmp`)); // symlink to a file
-	await symlink(path.join(root, 'does-not-exist'), path.join(root, `public/models/.chair.glb.${HEX}.tmp`)); // dangling
-	await symlink(path.join(outside, 'precious.txt'), path.join(root, `public/models/.other.glb.${HEX}.tmp`)); // outside the repo
+	await symlink(path.join(root, 'target.txt'), path.join(root, `local/.models.json.${HEX}.tmp`)); // symlink to a file
+	await symlink(path.join(root, 'does-not-exist'), path.join(root, `local/models/.chair.glb.${HEX}.tmp`)); // dangling
+	await symlink(path.join(outside, 'precious.txt'), path.join(root, `local/models/.other.glb.${HEX}.tmp`)); // outside the repo
 	const old = new Date(Date.now() - OLD);
-	await utimes(path.join(root, `src/data/.scene.json.${HEX}.tmp`), old, old);
+	await utimes(path.join(root, `local/.scene.json.${HEX}.tmp`), old, old);
 	const store = createLocalSave({ root, slugs: SLUGS });
 	assert.deepEqual(await store.sweepStaleTemp(), []);
-	assert.equal((await lstat(path.join(root, `src/data/.scene.json.${HEX}.tmp`))).isDirectory(), true);
-	for (const f of [`src/data/.models.json.${HEX}.tmp`, `public/models/.chair.glb.${HEX}.tmp`, `public/models/.other.glb.${HEX}.tmp`]) {
+	assert.equal((await lstat(path.join(root, `local/.scene.json.${HEX}.tmp`))).isDirectory(), true);
+	for (const f of [`local/.models.json.${HEX}.tmp`, `local/models/.chair.glb.${HEX}.tmp`, `local/models/.other.glb.${HEX}.tmp`]) {
 		assert.equal((await lstat(path.join(root, f))).isSymbolicLink(), true, `${f} still a symlink`);
 	}
 	assert.equal(await readFile(path.join(root, 'target.txt'), 'utf8'), 'target');
 	assert.equal(await readFile(path.join(outside, 'precious.txt'), 'utf8'), 'keep me');
 });
 
-test('sweep: a SYMLINKED public/models (or src/data) is not swept — nothing outside the repo is touched or removed', async () => {
-	for (const linked of ['public/models', 'src/data']) {
+test('sweep: a SYMLINKED local/models (or local/) is not swept — nothing outside the repo is touched or removed', async () => {
+	for (const linked of ['local/models', 'local']) {
 		const root = await makeRepo();
 		const outside = path.join(base, `outside${n++}`);
 		await mkdir(outside, { recursive: true });
-		const name = linked === 'public/models' ? `.chair.glb.${HEX}.tmp` : `.scene.json.${HEX}.tmp`;
+		const name = linked === 'local/models' ? `.chair.glb.${HEX}.tmp` : `.scene.json.${HEX}.tmp`;
 		await plant(outside, name);
 		await rm(path.join(root, linked), { recursive: true });
 		await symlink(outside, path.join(root, linked));
@@ -382,27 +385,27 @@ test('sweep: the other directory is still swept when one is symlinked or missing
 	const outside = path.join(base, `outside${n++}`);
 	await mkdir(outside, { recursive: true });
 	await plant(outside, `.chair.glb.${HEX}.tmp`);
-	await rm(path.join(root, 'public/models'), { recursive: true });
-	await symlink(outside, path.join(root, 'public/models'));
-	await plant(root, `src/data/.scene.json.${HEX}.tmp`);
+	await rm(path.join(root, 'local/models'), { recursive: true });
+	await symlink(outside, path.join(root, 'local/models'));
+	await plant(root, `local/.scene.json.${HEX}.tmp`);
 	const store = createLocalSave({ root, slugs: SLUGS });
-	assert.deepEqual(await store.sweepStaleTemp(), [`src/data/.scene.json.${HEX}.tmp`]);
+	assert.deepEqual(await store.sweepStaleTemp(), [`local/.scene.json.${HEX}.tmp`]);
 	assert.equal(await exists(path.join(outside, `.chair.glb.${HEX}.tmp`)), true);
-	// missing public/ entirely
-	await rm(path.join(root, 'public'), { recursive: true });
-	await plant(root, `src/data/.models.json.${HEX}.tmp`);
-	assert.deepEqual(await store.sweepStaleTemp(), [`src/data/.models.json.${HEX}.tmp`]);
+	// local/models missing entirely (the sweep does not create it)
+	await rm(path.join(root, 'local/models'), { recursive: true });
+	await plant(root, `local/.models.json.${HEX}.tmp`);
+	assert.deepEqual(await store.sweepStaleTemp(), [`local/.models.json.${HEX}.tmp`]);
 });
 
 test('sweep: uses the injected id rule only for the glb dir, and removals are marked via onWrite', async () => {
 	const root = await makeRepo();
 	const marks: string[] = [];
 	const store = createLocalSave({ root, slugs: SLUGS, onWrite: (p: string) => marks.push(p) });
-	await plant(root, `public/models/.chair.glb.${HEX}.tmp`);
-	await plant(root, `src/data/.scene.json.${HEX}.tmp`);
+	await plant(root, `local/models/.chair.glb.${HEX}.tmp`);
+	await plant(root, `local/.scene.json.${HEX}.tmp`);
 	await store.sweepStaleTemp();
-	assert.ok(marks.includes(path.join(root, `public/models/.chair.glb.${HEX}.tmp`)));
-	assert.ok(marks.includes(path.join(root, `src/data/.scene.json.${HEX}.tmp`)));
+	assert.ok(marks.includes(path.join(root, `local/models/.chair.glb.${HEX}.tmp`)));
+	assert.ok(marks.includes(path.join(root, `local/.scene.json.${HEX}.tmp`)));
 });
 
 test('sweep: what atomicWrite creates is what the sweep recognises (names produced by real writes match the patterns)', async () => {
@@ -414,6 +417,7 @@ test('sweep: what atomicWrite creates is what the sweep recognises (names produc
 	await store.writeFile('public/models/chair.glb', GLB, null);
 	const temps = [...new Set(seen.filter((p) => p.endsWith('.tmp')))];
 	assert.ok(temps.length >= 2, `writes produced temp names: ${temps.join(', ')}`);
+	assert.ok(temps.every((t) => t.startsWith('local/') || t.startsWith(`local${path.sep}`)), `all temp files are created under local/: ${temps.join(', ')}`);
 	// plant one file per produced name, age it, sweep: every one of them is recognised and removed
 	for (const t of temps) await plant(root, t);
 	assert.deepEqual([...(await store.sweepStaleTemp())].sort(), [...temps].sort());

@@ -1,7 +1,7 @@
 // Wires the /admin page: DOM controls <-> editor <-> GitHub client.
 // Everything user-visible that comes from GitHub or from the token goes through textContent only.
 import { SIZE_LIMIT_HINT } from '../../data/object-size';
-import { LIMITS, parseScene, serializeScene, validateScene } from '../../data/scene';
+import { LIMITS, parseModels, parseScene, serializeScene, validateScene } from '../../data/scene';
 import type { ParseOptions, SceneData, SceneObject, Vec3 } from '../../data/scene';
 import { catalogEntry } from '../room-objects';
 import { GITHUB_WORDING } from './backend';
@@ -22,6 +22,7 @@ import {
 } from './github';
 import type { GithubClient, GithubTarget, StorageLike } from './github';
 import { mountModelLibrary } from './model-library';
+import { MODELS_JSON_PATH } from './model-ops';
 import type { ModelLibrary } from './model-library';
 import { buildObjectRows, objectRowsSignature } from './object-list';
 import type { ObjectRow } from './object-list';
@@ -585,12 +586,26 @@ export function mountAdmin(root: HTMLElement) {
 				wording = local.LOCAL_WORDING;
 				if (statusLine.textContent === initialStatus) setStatus(wording.ready);
 				devClientReady = created;
+				void refreshLocalBanner();
+				// Armed on EVERY successful probe, before the caller's action goes on: a broken hand edit blocks Save at once.
+				await checkLocalData(created);
 				return created;
 			} finally {
 				devProbe = null;
 			}
 		})());
 	};
+	/** Shows " — differs from committed" in the always-visible dev banner when local/ scene or models differ. Never throws. */
+	async function refreshLocalBanner() {
+		try {
+			const local = await import('./local-client');
+			const differs = await local.fetchDiffers();
+			const flag = document.getElementById('dev-local-differs');
+			if (flag && differs !== null) flag.hidden = !differs;
+		} catch {
+			// the banner keeps its last state
+		}
+	}
 	/** The Save tab without the GitHub-only inputs, plus the dev note. Tolerates missing nodes. */
 	function useDiskLayout() {
 		for (const element of root.querySelectorAll<HTMLElement>('[data-github-only]')) element.hidden = true;
@@ -600,13 +615,89 @@ export function mountAdmin(root: HTMLElement) {
 		const note = document.getElementById('dev-save-note');
 		if (note) note.hidden = false;
 	}
+	/**
+	 * DEV ONLY. Problems found in local/scene.json / local/models.json (hand edits): while there are any, Save and
+	 * Save models are blocked, so a broken-but-fixable file is not overwritten by an empty scene built from it.
+	 * Cleared by a "Load latest" (or a page reload) that reads valid data.
+	 */
+	let localProblems: string[] = [];
+	let localBlockStatus = '';
+	const localBlockMessage = () =>
+		`Saving is blocked: ${localProblems.join('; ')}. Fix the file in local/, then click "Load latest".`;
+	function showLocalProblems() {
+		const box = document.getElementById('dev-local-problem');
+		if (box) {
+			box.textContent = localProblems.length > 0 ? `${localProblems.join('; ')} — fix the file, then click "Load latest" (Save is blocked until then).` : '';
+			box.hidden = localProblems.length === 0;
+		}
+		if (localProblems.length > 0) {
+			localBlockStatus = localBlockMessage();
+			setStatus(localBlockStatus, 'error'); // also flags the Save tab
+		} else if (localBlockStatus && statusLine.textContent === localBlockStatus) {
+			setStatus('');
+			localBlockStatus = '';
+		}
+	}
+	/** Reads local/scene.json and local/models.json through the dev client and records what is wrong with them. */
+	// Takes the client as an argument (not `devClient`): probeDevBackend -> checkLocalData -> devClient -> probeDevBackend would
+	// be a reference cycle that the minifier cannot drop, and the dev code would then leak into the production bundle.
+	async function checkLocalData(local: GithubClient) {
+		const found: string[] = [];
+		/** The text of one local file, or null with the problem recorded; `unreachable` when the endpoint cannot answer. */
+		const readOne = async (name: string, read: () => Promise<{ text: string }>): Promise<string | null | 'unreachable'> => {
+			try {
+				return (await read()).text;
+			} catch (error) {
+				if (error instanceof GithubError && (error.kind === 'network' || error.kind === 'timeout')) return 'unreachable';
+				// Anything else (invalid UTF-8, too large, a bad answer ...) means the file cannot be used: block, naming it.
+				const why = error instanceof GithubError ? error.message.replace(/\.$/, '') : 'unexpected error';
+				found.push(`local/${name} cannot be read (${why})`);
+				return null;
+			}
+		};
+		// Separate reads, so a problem in one file is kept when the other cannot be read either.
+		const sceneText = await readOne('scene.json', () => local.getFile());
+		const modelsText = await readOne('models.json', () => local.getFileAt(MODELS_JSON_PATH, ''));
+		if (sceneText === 'unreachable' || modelsText === 'unreachable') return; // probeDevBackend reports that; keep the old state
+		if (sceneText !== null) {
+			let json: unknown;
+			let parsed = true;
+			try {
+				json = JSON.parse(sceneText);
+			} catch {
+				parsed = false;
+				found.push('local/scene.json is not valid JSON');
+			}
+			if (parsed) {
+				const result = parseScene(json, parseOptions);
+				if (!result.ok) found.push(`local/scene.json cannot be used as a scene (${result.warnings[0]})`);
+			}
+		}
+		if (modelsText !== null) {
+			try {
+				const list: unknown = JSON.parse(modelsText);
+				if (!Array.isArray(list)) found.push('local/models.json is not a list of models');
+				else if (parseModels(list).length !== list.length) found.push('local/models.json has entries that cannot be read');
+			} catch {
+				found.push('local/models.json is not valid JSON');
+			}
+		}
+		localProblems = found;
+		showLocalProblems();
+	}
 	const devClient: GithubClient = {
 		getFile: async () => (await probeDevBackend()).getFile(),
-		putFile: async (args) => (await probeDevBackend()).putFile(args),
+		putFile: async (args) => {
+			if (localProblems.length > 0) throw new GithubError('invalid-config', localBlockMessage());
+			return (await probeDevBackend()).putFile(args);
+		},
 		getFileAt: async (path, ref) => (await probeDevBackend()).getFileAt(path, ref),
 		getBlobSha: async (path, ref) => (await probeDevBackend()).getBlobSha(path, ref),
 		getHead: async () => (await probeDevBackend()).getHead(),
-		commitFiles: async (args) => (await probeDevBackend()).commitFiles(args),
+		commitFiles: async (args) => {
+			if (localProblems.length > 0) throw new GithubError('invalid-config', localBlockMessage());
+			return (await probeDevBackend()).commitFiles(args);
+		},
 	};
 
 	const client = (): GithubClient => (import.meta.env.DEV ? devClient : githubClient());
@@ -633,6 +724,7 @@ export function mountAdmin(root: HTMLElement) {
 			// Dev: the backend decision (and its wording) must be known before anything runs.
 			if (import.meta.env.DEV) await probeDevBackend();
 			await action();
+			if (import.meta.env.DEV) void refreshLocalBanner(); // a save can change whether local/ differs
 		} catch (error) {
 			onError(error);
 		} finally {
@@ -671,6 +763,7 @@ export function mountAdmin(root: HTMLElement) {
 		showWarnings([...remote.warnings, ...keptNotes(remote.scene)]);
 		setStatus(wording.loaded, 'success');
 		library?.checkRemovals();
+		if (import.meta.env.DEV) await checkLocalData(await probeDevBackend()); // a fixed hand edit unblocks Save here
 	}
 
 	// Loading replaces unsaved edits, so a click on "Load latest" with edits needs a second click.
@@ -692,6 +785,7 @@ export function mountAdmin(root: HTMLElement) {
 	reloadButton.addEventListener('click', () => void guarded(load));
 
 	async function save(overwrite: boolean) {
+		if (import.meta.env.DEV && localProblems.length > 0) throw new GithubError('invalid-config', localBlockMessage());
 		const scene = editor?.getScene() ?? bundled.scene;
 		// The site is built from the repository: an object of a model that is not committed yet would show a broken box.
 		const unsaved = library?.pendingUsedBy(scene) ?? [];

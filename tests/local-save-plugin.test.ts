@@ -1,6 +1,8 @@
 // Tests for dev/local-save-plugin.mjs: the real middleware driven with mock requests (no socket, no dev server),
 // including the request guard as the HTTP layer applies it, status codes, response headers, and the `hotUpdate`
-// hook that suppresses the reload for files the endpoint wrote. Temp repo roots live in tests/.tmp-local-save-plugin-*.
+// hook that suppresses the reload for files the endpoint wrote. Dev data lives in local/ (the wire paths are still
+// src/data/*.json and public/models/<id>.glb); the committed canaries must stay untouched. Temp repo roots live in
+// tests/.tmp-local-save-plugin-*. The `load` hook and the /models/ route are in tests/local-folder-plugin.test.ts.
 // Run: node --test tests/
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,6 +14,7 @@ import { gitBlobSha, MAX_FILE_BYTES } from '../dev/local-save-core.mjs';
 import { MAX_MODEL_BYTES } from '../src/scripts/admin/model-file.ts';
 import { emptyScene, serializeScene } from '../src/data/scene.ts';
 import { makeBoxGlb } from './helpers/gltf-fixtures.ts';
+import { seedRepo, snapshotCommitted } from './helpers/local-repo.ts';
 import { makeHarness, ORIGIN, PORT } from './helpers/local-save-http.ts';
 import type { Harness } from './helpers/local-save-http.ts';
 
@@ -35,12 +38,10 @@ after(async () => {
 	if (base) await rm(base, { recursive: true, force: true });
 });
 
+const LOCAL_SCENE = 'local/scene.json';
 async function makeRepo() {
 	const root = path.join(base, `repo${n++}`);
-	await mkdir(path.join(root, 'src/data'), { recursive: true });
-	await mkdir(path.join(root, 'public/models'), { recursive: true });
-	await writeFile(path.join(root, SCENE), sceneText());
-	await writeFile(path.join(root, MODELS), '[]\n');
+	await seedRepo(root, { scene: sceneText(), models: '[]\n' });
 	return root;
 }
 async function makeServer() {
@@ -88,7 +89,7 @@ test('plugin: unknown route is 404, wrong method is 405 with Allow', async () =>
 	}
 });
 
-test('plugin: GET file / blob-sha / head return what is on disk', async () => {
+test('plugin: GET file / blob-sha / head return what is in local/ (never the committed twin)', async () => {
 	const { h, root } = await makeServer();
 	const file = await json(await h.fetch(`/__local-save/file?path=${encodeURIComponent(SCENE)}`, { headers: G }));
 	assert.equal(file.text, sceneText());
@@ -97,7 +98,9 @@ test('plugin: GET file / blob-sha / head return what is on disk', async () => {
 	assert.equal(blob.sha, null);
 	const head = await json(await h.fetch('/__local-save/head', { headers: G }));
 	assert.match(head.head, /^[0-9a-f]{40}$/);
+	assert.equal(typeof head.differs, 'boolean', 'head carries the banner flag');
 	assert.equal((await readdir(root)).includes('package.json'), false);
+	assert.deepEqual((await json(await h.fetch(`/__local-save/file?path=${encodeURIComponent(MODELS)}`, { headers: G }))).text, '[]\n');
 });
 
 test('plugin: path parameter must be present exactly once; traversal / absolute / encoded paths are 403', async () => {
@@ -126,8 +129,9 @@ test('plugin guard: reads need the custom header; writes additionally need the e
 
 test('plugin guard: a PUT without the custom header, with a wrong Origin, without Origin or with a wrong content type never writes', async () => {
 	const { h, root } = await makeServer();
-	const before = await readFile(path.join(root, SCENE), 'utf8');
+	const before = await readFile(path.join(root, LOCAL_SCENE), 'utf8');
 	const sha = gitBlobSha(Buffer.from(before));
+	const committedBefore = await snapshotCommitted(root);
 	const url = `/__local-save/file?path=${encodeURIComponent(SCENE)}&sha=${sha}`;
 	const body = Buffer.from(sceneText('box'));
 	const okHeaders = { host: `localhost:${PORT}`, origin: ORIGIN, 'sec-fetch-site': 'same-origin', 'x-alishly-local-save': '1', 'content-type': 'application/json' };
@@ -150,10 +154,11 @@ test('plugin guard: a PUT without the custom header, with a wrong Origin, withou
 	const noOrigin: Record<string, string> = { ...okHeaders };
 	delete noOrigin.origin;
 	assert.equal((await h.raw('PUT', url, noOrigin, body)).status, 403, 'no Origin');
-	assert.equal(await readFile(path.join(root, SCENE), 'utf8'), before, 'file untouched by every refused request');
+	assert.equal(await readFile(path.join(root, LOCAL_SCENE), 'utf8'), before, 'file untouched by every refused request');
 	// and the same request with correct headers works
 	assert.equal((await h.raw('PUT', url, okHeaders, body)).status, 200);
-	assert.equal(await readFile(path.join(root, SCENE), 'utf8'), body.toString());
+	assert.equal(await readFile(path.join(root, LOCAL_SCENE), 'utf8'), body.toString());
+	assert.deepEqual(await snapshotCommitted(root), committedBefore, 'the committed src/data files are byte-identical after the write');
 });
 
 test('plugin guard: a glb PUT needs application/octet-stream; a commit needs application/octet-stream', async () => {
@@ -163,9 +168,10 @@ test('plugin guard: a glb PUT needs application/octet-stream; a commit needs app
 	assert.equal((await put('application/json')).status, 415);
 	assert.equal((await put('model/gltf-binary')).status, 415);
 	assert.equal((await put(undefined)).status, 415);
-	assert.equal((await readdir(path.join(root, 'public/models'))).length, 0);
+	assert.equal((await readdir(path.join(root, 'local/models'))).length, 0);
 	assert.equal((await put('application/octet-stream')).status, 200);
-	assert.deepEqual(await readFile(path.join(root, 'public/models/a.glb')), Buffer.from(GLB));
+	assert.deepEqual(await readFile(path.join(root, 'local/models/a.glb')), Buffer.from(GLB));
+	assert.equal(await readFile(path.join(root, 'public/models/a.glb')).catch(() => null), null, 'nothing was written to public/models');
 	const commit = await h.fetch('/__local-save/commit', { method: 'POST', headers: { ...G, 'content-type': 'application/json' }, body: new Uint8Array(8) });
 	assert.equal(commit.status, 415);
 });
@@ -183,7 +189,7 @@ test('plugin: PUT with a stale sha is 409 conflict, invalid content 422, create-
 	assert.equal(bad.status, 422);
 	assert.equal((await json(bad)).error.kind, 'rejected');
 	assert.equal((await put(sceneText('box'), 'not-a-sha')).status, 400);
-	assert.equal(await readFile(path.join(root, SCENE), 'utf8'), sceneText());
+	assert.equal(await readFile(path.join(root, LOCAL_SCENE), 'utf8'), sceneText());
 });
 
 test('plugin: bodies over the model cap are 413 (declared and streamed), and the connection is marked for closing', async () => {
@@ -199,7 +205,7 @@ test('plugin: bodies over the model cap are 413 (declared and streamed), and the
 	const lying = await h.raw('PUT', url, { ...headers, 'content-length': '10' }, big);
 	assert.equal(lying.status, 413);
 	assert.equal(MAX_FILE_BYTES, MAX_MODEL_BYTES);
-	assert.deepEqual(await readdir(path.join(root, 'public/models')), []);
+	assert.deepEqual(await readdir(path.join(root, 'local/models')), []);
 });
 
 test('plugin: a model PUT then GET blob-sha round-trips; the head covers the new glb', async () => {
@@ -260,7 +266,8 @@ test('plugin: apply is "serve" (never part of `astro build`) and the factory its
 
 // ---- hotUpdate -----------------------------------------------------------------------------------------------
 
-function makeEnv(name: string) {
+/** twinModules: committed-file path -> modules Vite's module graph knows for it (the `?raw` modules of src/data/*.json). */
+function makeEnv(name: string, twinModules: Record<string, unknown[]> = {}) {
 	const invalidated: unknown[] = [];
 	const evaluatedInvalidated: unknown[] = [];
 	const env = {
@@ -271,6 +278,7 @@ function makeEnv(name: string) {
 				seen.add(mod);
 				invalidated.push(mod);
 			},
+			getModulesByFile: (file: string) => (twinModules[file] ? new Set(twinModules[file]) : undefined),
 		},
 		runner: {
 			evaluatedModules: {
@@ -281,61 +289,93 @@ function makeEnv(name: string) {
 	};
 	return { env, invalidated, evaluatedInvalidated };
 }
+const fwd = (p: string) => p.split(path.sep).join('/');
 
-test('hotUpdate: order "pre"; a file the endpoint just wrote is invalidated and its HMR event swallowed ([])', async () => {
+test('hotUpdate: order "pre"; a file the endpoint just wrote (local/scene.json) is invalidated together with the twin\'s modules and its HMR event swallowed ([])', async () => {
 	const { h, root } = await makeServer();
 	const hook = (h.plugin as any).hotUpdate;
 	assert.equal(hook.order, 'pre');
-	const scenePath = path.join(root, SCENE).split(path.sep).join('/');
+	const localScene = fwd(path.join(root, LOCAL_SCENE));
+	const twin = fwd(path.join(root, SCENE));
+	const twinMod = { id: `${twin}?raw` };
 	const sha = gitBlobSha(Buffer.from(sceneText()));
-	// nothing written yet -> a hand edit falls through (undefined)
-	const mod = { id: scenePath };
-	const probe = makeEnv('ssr');
-	assert.equal(hook.handler.call({ environment: probe.env }, { file: scenePath, modules: [mod], timestamp: 1 }), undefined);
-	assert.equal(probe.invalidated.length, 0);
+	// nothing written yet: a hand edit of local/scene.json is NOT swallowed — it hands the twin's modules to Vite (reload)
+	const probe = makeEnv('ssr', { [twin]: [twinMod] });
+	assert.deepEqual(hook.handler.call({ environment: probe.env }, { file: localScene, modules: [], timestamp: 1 }), [twinMod]);
+	assert.equal(probe.invalidated.length, 0, 'a hand edit invalidates nothing itself');
 	// write through the endpoint
 	const res = await h.fetch(`/__local-save/file?path=${encodeURIComponent(SCENE)}&sha=${sha}`, { method: 'PUT', headers: { ...G, 'content-type': 'application/json' }, body: new TextEncoder().encode(sceneText('box')) });
 	assert.equal(res.status, 200);
 	for (const name of ['ssr', 'client']) {
-		const e = makeEnv(name);
-		const out = hook.handler.call({ environment: e.env }, { file: scenePath, modules: [mod], timestamp: 2 });
+		const e = makeEnv(name, { [twin]: [twinMod] });
+		const out = hook.handler.call({ environment: e.env }, { file: localScene, modules: [], timestamp: 2 });
 		assert.deepEqual(out, [], `${name}: event swallowed`);
-		assert.deepEqual(e.invalidated, [mod], `${name}: module invalidated`);
+		assert.deepEqual(e.invalidated, [twinMod], `${name}: the twin's module invalidated`);
 		assert.equal(e.evaluatedInvalidated.length, 1, `${name}: runner cache invalidated`);
 	}
+	// the COMMITTED file's own watcher event is not "ours": it falls through untouched
+	const eCommitted = makeEnv('ssr', { [twin]: [twinMod] });
+	assert.equal(hook.handler.call({ environment: eCommitted.env }, { file: twin, modules: [twinMod], timestamp: 3 }), undefined);
+	assert.equal(eCommitted.invalidated.length, 0);
 	// a different file is untouched
-	const other = path.join(root, 'src/data/family.ts').split(path.sep).join('/');
+	const other = fwd(path.join(root, 'src/data/family.ts'));
 	const e2 = makeEnv('ssr');
-	assert.equal(hook.handler.call({ environment: e2.env }, { file: other, modules: [{ id: other }], timestamp: 3 }), undefined);
+	assert.equal(hook.handler.call({ environment: e2.env }, { file: other, modules: [{ id: other }], timestamp: 4 }), undefined);
 	assert.equal(e2.invalidated.length, 0);
 	assert.ok(h.logs.some((l) => /no reload for scene\.json/.test(l.text)));
+});
+
+test('hotUpdate: a hand edit of local/scene.json or local/models.json reloads — the twin\'s modules are unioned with the event\'s own; none known => falls through', async () => {
+	const { h, root } = await makeServer();
+	const hook = (h.plugin as any).hotUpdate;
+	for (const [local, committed] of [[LOCAL_SCENE, SCENE], ['local/models.json', MODELS]] as const) {
+		const lf = fwd(path.join(root, local));
+		const twin = fwd(path.join(root, committed));
+		const own = { id: 'own' };
+		const t1 = { id: 't1' };
+		const t2 = { id: 't2' };
+		const e = makeEnv('client', { [twin]: [t1, t2, own] });
+		const out = hook.handler.call({ environment: e.env }, { file: lf, modules: [own], timestamp: 1 }) as unknown[];
+		assert.deepEqual([...out].map((m: any) => m.id).sort(), ['own', 't1', 't2'], `${local}: union, no duplicates`);
+		assert.equal(e.invalidated.length, 0);
+		// twin has no module in this environment, the file has none either: normal fall-through
+		assert.equal(hook.handler.call({ environment: makeEnv('ssr').env }, { file: lf, modules: [], timestamp: 2 }), undefined, `${local}: nothing to reload`);
+		// with only the event's own modules it still falls through (identical list)
+		assert.equal(hook.handler.call({ environment: makeEnv('ssr').env }, { file: lf, modules: [own], timestamp: 3 }), undefined);
+	}
 });
 
 test('hotUpdate: models.json and glb writes are recognised too; a rejected write marks nothing', async () => {
 	const { h, root } = await makeServer();
 	const hook = (h.plugin as any).hotUpdate;
-	const norm = (rel: string) => path.join(root, rel).split(path.sep).join('/');
+	const norm = (rel: string) => fwd(path.join(root, rel));
+	const twin = norm(MODELS);
+	const twinMod = { id: 'models-raw' };
 	// a refused PUT (bad content) must not mark the file
 	const refused = await h.fetch(`/__local-save/file?path=${encodeURIComponent(MODELS)}&sha=${gitBlobSha(Buffer.from('[]\n'))}`, { method: 'PUT', headers: { ...G, 'content-type': 'application/json' }, body: new TextEncoder().encode('{}') });
 	assert.equal(refused.status, 422);
-	assert.equal(hook.handler.call({ environment: makeEnv('client').env }, { file: norm(MODELS), modules: [{ id: 'm' }], timestamp: 1 }), undefined, 'refused write marks nothing');
+	assert.deepEqual(hook.handler.call({ environment: makeEnv('client', { [twin]: [twinMod] }).env }, { file: norm('local/models.json'), modules: [], timestamp: 1 }), [twinMod], 'refused write marks nothing: this is a "hand edit" (reload)');
 	const ok = await h.fetch(`/__local-save/file?path=${encodeURIComponent(MODELS)}&sha=${gitBlobSha(Buffer.from('[]\n'))}`, { method: 'PUT', headers: { ...G, 'content-type': 'application/json' }, body: new TextEncoder().encode('[]\n\n') });
 	assert.equal(ok.status, 200);
-	assert.deepEqual(hook.handler.call({ environment: makeEnv('client').env }, { file: norm(MODELS), modules: [{ id: 'm' }], timestamp: 2 }), []);
+	assert.deepEqual(hook.handler.call({ environment: makeEnv('client', { [twin]: [twinMod] }).env }, { file: norm('local/models.json'), modules: [], timestamp: 2 }), []);
 	await h.fetch(`/__local-save/file?path=${encodeURIComponent('public/models/z.glb')}`, { method: 'PUT', headers: { ...G, 'content-type': 'application/octet-stream' }, body: GLB });
-	assert.deepEqual(hook.handler.call({ environment: makeEnv('client').env }, { file: norm('public/models/z.glb'), modules: [], timestamp: 3 }), [], 'glb with no modules is still swallowed');
+	assert.deepEqual(hook.handler.call({ environment: makeEnv('client').env }, { file: norm('local/models/z.glb'), modules: [], timestamp: 3 }), [], 'glb with no modules is still swallowed');
+	// the public/ path of the same glb was never written and is never "ours"
+	assert.equal(hook.handler.call({ environment: makeEnv('client').env }, { file: norm('public/models/z.glb'), modules: [], timestamp: 4 }), undefined);
 });
 
 test('hotUpdate: the mark expires — a hand edit after the TTL reloads as before', async (t) => {
 	const { h, root } = await makeServer();
 	const hook = (h.plugin as any).hotUpdate;
-	const scenePath = path.join(root, SCENE).split(path.sep).join('/');
+	const scenePath = fwd(path.join(root, LOCAL_SCENE));
+	const twinMod = { id: 'scene-raw' };
+	const twins = { [fwd(path.join(root, SCENE))]: [twinMod] };
 	t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
 	const sha = gitBlobSha(Buffer.from(sceneText()));
 	await h.fetch(`/__local-save/file?path=${encodeURIComponent(SCENE)}&sha=${sha}`, { method: 'PUT', headers: { ...G, 'content-type': 'application/json' }, body: new TextEncoder().encode(sceneText('box')) });
-	assert.deepEqual(hook.handler.call({ environment: makeEnv('ssr').env }, { file: scenePath, modules: [{ id: 'x' }], timestamp: 1 }), []);
+	assert.deepEqual(hook.handler.call({ environment: makeEnv('ssr', twins).env }, { file: scenePath, modules: [{ id: 'x' }], timestamp: 1 }), []);
 	t.mock.timers.tick(5001);
-	assert.equal(hook.handler.call({ environment: makeEnv('ssr').env }, { file: scenePath, modules: [{ id: 'x' }], timestamp: 2 }), undefined);
+	assert.deepEqual((hook.handler.call({ environment: makeEnv('ssr', twins).env }, { file: scenePath, modules: [{ id: 'x' }], timestamp: 2 }) as any[]).map((m) => m.id).sort(), ['scene-raw', 'x']);
 });
 
 // A hand edit is not tested live (needs the user); see tester-r1.md.

@@ -1,6 +1,9 @@
 // Tests for the dev-only local save (dev/local-save-core.mjs): path allowlist, id rule, request guard, content
-// validation, sha/head conflicts, atomic writes, commit order, delete rules. The store runs against a temp repo root
-// created INSIDE this repo (tests/.tmp-local-save-core-*) and removed afterwards. Run: node --test tests/
+// validation, sha/head conflicts, atomic writes, commit order, delete rules. The wire paths are still src/data/*.json and
+// public/models/<id>.glb, but in dev everything is read and written under local/ (local/scene.json, local/models.json,
+// local/models/<id>.glb); the committed canaries of the temp repo must stay byte-identical (checked in the last test and
+// in tests/local-folder-core.test.ts). The store runs against a temp repo root created INSIDE this repo
+// (tests/.tmp-local-save-core-*) and removed afterwards. Run: node --test tests/
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile, stat } from 'node:fs/promises';
@@ -15,6 +18,7 @@ import { emptyScene, serializeScene } from '../src/data/scene.ts';
 import { gitBlobSha as modelOpsBlobSha } from '../src/scripts/admin/model-ops.ts';
 import { MAX_MODEL_BYTES } from '../src/scripts/admin/model-file.ts';
 import { makeBoxGlb } from './helpers/gltf-fixtures.ts';
+import { seedRepo, snapshotCommitted, toDisk, COMMITTED_SCENE } from './helpers/local-repo.ts';
 
 const SLUGS = ['elnur', 'sabina', 'nadir', 'chinara', 'alibala', 'elkhan', 'fazil'];
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -61,17 +65,17 @@ after(async () => {
 	if (tmpBase) await rm(tmpBase, { recursive: true, force: true });
 });
 
-/** A fresh fake repo root with a scene, a models.json and (optionally) one model. */
+/**
+ * A fresh fake repo root: local/ holds a scene, a models.json and (optionally) models; src/data and public/models hold
+ * committed canaries. `read(wire path)` and `abs(wire path)` look at the local/ copy.
+ */
 async function makeRepo(opts: { scene?: string; models?: string; glbs?: string[] } = {}) {
 	const root = path.join(tmpBase, `repo${n++}`);
-	await mkdir(path.join(root, 'src/data'), { recursive: true });
-	await mkdir(path.join(root, 'public/models'), { recursive: true });
-	await writeFile(path.join(root, SCENE_PATH), opts.scene ?? sceneText());
-	await writeFile(path.join(root, MODELS_PATH), opts.models ?? modelsText(...(opts.glbs ?? [])));
-	for (const id of opts.glbs ?? []) await writeFile(path.join(root, `public/models/${id}.glb`), GLB);
+	const seeded = await seedRepo(root, { scene: opts.scene ?? sceneText(), models: opts.models ?? modelsText(...(opts.glbs ?? [])), glbs: opts.glbs });
 	const touched: string[] = [];
 	const store = createLocalSave({ root, slugs: SLUGS, onWrite: (abs: string) => touched.push(abs) });
-	return { root, store, touched, read: (rel: string) => readFile(path.join(root, rel)) };
+	const abs = (rel: string) => path.join(root, toDisk(rel));
+	return { root, store, touched, abs, baseline: await seeded.snapshot(), read: (rel: string) => readFile(abs(rel)) };
 }
 
 // ---- path allowlist ------------------------------------------------------------------------------------------
@@ -202,14 +206,27 @@ test('store: readText returns the text with its git blob sha; models are never s
 	await rejects(repo.store.readText('public/models/chair.glb'), 403, 'forbidden');
 	await rejects(repo.store.readText('package.json'), 403, 'forbidden');
 	await rejects(repo.store.readText('../x'), 403, 'forbidden');
-	await rm(path.join(repo.root, MODELS_PATH));
-	await rejects(repo.store.readText(MODELS_PATH), 404, 'not-found');
+	// local/models.json deleted: the next read re-creates the empty library instead of failing (never a 404 in dev)
+	await rm(repo.abs(MODELS_PATH));
+	const again = await repo.store.readText(MODELS_PATH);
+	assert.equal(again.text, '[]\n');
+	assert.equal(again.path, MODELS_PATH, 'responses keep the wire path');
+});
+
+test('store: readText reads local/, never the committed twin (same wire path, different content)', async () => {
+	const repo = await makeRepo();
+	const r = await repo.store.readText(SCENE_PATH);
+	assert.equal(r.text, sceneText());
+	assert.notEqual(r.text, COMMITTED_SCENE);
+	assert.equal(r.path, SCENE_PATH);
 });
 
 test('store: blobSha of a glb is the git blob sha, null when missing, 403 for other paths', async () => {
 	const repo = await makeRepo({ glbs: ['chair'] });
 	assert.deepEqual(await repo.store.blobSha('public/models/chair.glb'), { path: 'public/models/chair.glb', sha: gitBlobSha(Buffer.from(GLB)) });
 	assert.equal((await repo.store.blobSha('public/models/none.glb')).sha, null);
+	// the committed canary glb exists only under public/models: invisible to the dev store
+	assert.equal((await repo.store.blobSha('public/models/committed-canary.glb')).sha, null);
 	await rejects(repo.store.blobSha('package.json'), 403, 'forbidden');
 	await rejects(repo.store.blobSha('public/models/../../package.json'), 403, 'forbidden');
 });
@@ -224,12 +241,13 @@ test('writeFile: writes valid scene content atomically (temp file + rename, no l
 	assert.equal(result.sha, gitBlobSha(utf8(next)));
 	assert.equal((await repo.read(SCENE_PATH)).toString(), next);
 	assert.equal(result.head, (await repo.store.head()).head);
-	const leftovers = (await readdir(path.join(repo.root, 'src/data'))).filter((f) => f.endsWith('.tmp'));
+	const leftovers = (await readdir(path.join(repo.root, 'local'))).filter((f) => f.endsWith('.tmp'));
 	assert.deepEqual(leftovers, []);
-	// the temp path was announced to onWrite (so the Vite plugin can tell it is ours) and sits in the same directory
+	// the temp path was announced to onWrite (so the Vite plugin can tell it is ours) and sits in the same directory (local/)
 	const tmps = repo.touched.filter((p) => p.endsWith('.tmp'));
-	assert.ok(tmps.length > 0 && tmps.every((p) => path.dirname(p) === path.join(repo.root, 'src/data')));
-	assert.ok(repo.touched.includes(path.join(repo.root, SCENE_PATH)));
+	assert.ok(tmps.length > 0 && tmps.every((p) => path.dirname(p) === path.join(repo.root, 'local')));
+	assert.ok(repo.touched.includes(path.join(repo.root, 'local/scene.json')));
+	assert.ok(!repo.touched.some((p) => p.includes(`${path.sep}src${path.sep}`) || p.includes(`${path.sep}public${path.sep}`)), 'nothing under src/ or public/ was touched');
 });
 
 test('writeFile: atomic — a failure during the write leaves the old content and no temp file', async () => {
@@ -237,13 +255,13 @@ test('writeFile: atomic — a failure during the write leaves the old content an
 	const old = await repo.read(SCENE_PATH);
 	const sha = (await repo.store.readText(SCENE_PATH)).sha;
 	// make the target a directory-less path trick: replace the scene by a directory -> "not a regular file" refusal before any write
-	await rm(path.join(repo.root, SCENE_PATH));
-	await mkdir(path.join(repo.root, SCENE_PATH));
+	await rm(repo.abs(SCENE_PATH));
+	await mkdir(repo.abs(SCENE_PATH));
 	await rejects(repo.store.writeFile(SCENE_PATH, utf8(sceneText([obj('a', 'box')])), null), 403, 'forbidden');
-	await rm(path.join(repo.root, SCENE_PATH), { recursive: true });
-	await writeFile(path.join(repo.root, SCENE_PATH), old);
+	await rm(repo.abs(SCENE_PATH), { recursive: true });
+	await writeFile(repo.abs(SCENE_PATH), old);
 	assert.equal((await repo.store.readText(SCENE_PATH)).sha, sha);
-	assert.deepEqual((await readdir(path.join(repo.root, 'src/data'))).filter((f) => f.endsWith('.tmp')), []);
+	assert.deepEqual((await readdir(path.join(repo.root, 'local'))).filter((f) => f.endsWith('.tmp')), []);
 });
 
 test('writeFile: a stale or missing sha is a 409 and nothing changes; sha omitted = create-only', async () => {
@@ -255,12 +273,16 @@ test('writeFile: a stale or missing sha is a 409 and nothing changes; sha omitte
 	assert.deepEqual(await repo.read(SCENE_PATH), old);
 	// external edit after the sha was read
 	const seen = (await repo.store.readText(SCENE_PATH)).sha;
-	await writeFile(path.join(repo.root, SCENE_PATH), sceneText([obj('z', 'lamp')]));
+	await writeFile(repo.abs(SCENE_PATH), sceneText([obj('z', 'lamp')]));
 	await rejects(repo.store.writeFile(SCENE_PATH, next, seen), 409, 'conflict');
 	assert.equal((await repo.read(SCENE_PATH)).toString(), sceneText([obj('z', 'lamp')]));
-	// create-only works for a missing file
-	await rm(path.join(repo.root, MODELS_PATH));
-	await repo.store.writeFile(MODELS_PATH, utf8(modelsText()), null);
+	// the committed twin is irrelevant to the sha check: its blob sha is never accepted
+	await rejects(repo.store.writeFile(SCENE_PATH, next, gitBlobSha(utf8(COMMITTED_SCENE))), 409, 'conflict');
+	// models.json deleted behind the store's back is re-created empty ("[]\n"), so create-only (sha null) is a 409 now;
+	// writing with the sha of the re-created file works
+	await rm(repo.abs(MODELS_PATH));
+	await rejects(repo.store.writeFile(MODELS_PATH, utf8(modelsText()), null), 409, 'conflict');
+	await repo.store.writeFile(MODELS_PATH, utf8(modelsText()), gitBlobSha(utf8('[]\n')));
 	assert.equal((await repo.read(MODELS_PATH)).toString(), modelsText());
 });
 
@@ -276,7 +298,7 @@ test('writeFile: refuses paths outside the allowlist without touching the disk',
 	for (const p of ['package.json', '../escape.json', '/tmp/escape.json', 'public/models/../../x.glb', 'src/data/family.ts', 'public/models/bad id.glb']) {
 		await rejects(repo.store.writeFile(p, GLB, null), 403, 'forbidden');
 	}
-	assert.deepEqual((await readdir(repo.root)).sort(), ['public', 'src']);
+	assert.deepEqual((await readdir(repo.root)).sort(), ['local', 'public', 'src']);
 	assert.equal(await stat(path.join(tmpBase, 'escape.json')).catch(() => null), null);
 });
 
@@ -307,7 +329,7 @@ test('writeFile: server-side validation rejects a bad scene, bad models.json and
 	await rejects(repo.store.writeFile('public/models/a.glb', Buffer.alloc(0), null), 422, 'rejected');
 	const truncated = Buffer.from(GLB).subarray(0, GLB.byteLength - 5);
 	await rejects(repo.store.writeFile('public/models/a.glb', truncated, null), 422, 'rejected');
-	assert.equal(await stat(path.join(repo.root, 'public/models/a.glb')).catch(() => null), null);
+	assert.equal(await stat(repo.abs('public/models/a.glb')).catch(() => null), null);
 	assert.equal((await repo.read(SCENE_PATH)).toString(), sceneText());
 });
 
@@ -323,20 +345,28 @@ test('writeFile: a symlinked target or a symlinked parent directory is refused',
 	const repo = await makeRepo({ glbs: ['chair'] });
 	const outside = path.join(tmpBase, 'outside.txt');
 	await writeFile(outside, 'secret');
-	// symlinked target file
-	await rm(path.join(repo.root, 'public/models/chair.glb'));
-	await symlink(outside, path.join(repo.root, 'public/models/chair.glb'));
+	// symlinked target file (local/models/chair.glb)
+	await rm(repo.abs('public/models/chair.glb'));
+	await symlink(outside, repo.abs('public/models/chair.glb'));
 	await rejects(repo.store.writeFile('public/models/chair.glb', GLB, null), 403, 'forbidden');
 	await rejects(repo.store.blobSha('public/models/chair.glb'), 403, 'forbidden');
 	assert.equal((await readFile(outside)).toString(), 'secret');
-	// symlinked parent directory
+	// symlinked parent directory (local/models)
 	const repo2 = await makeRepo();
 	const elsewhere = path.join(tmpBase, 'elsewhere');
 	await mkdir(elsewhere);
-	await rm(path.join(repo2.root, 'public/models'), { recursive: true });
-	await symlink(elsewhere, path.join(repo2.root, 'public/models'));
+	await rm(path.join(repo2.root, 'local/models'), { recursive: true });
+	await symlink(elsewhere, path.join(repo2.root, 'local/models'));
 	await rejects(repo2.store.writeFile('public/models/new.glb', GLB, null), 403, 'forbidden');
 	assert.deepEqual(await readdir(elsewhere), []);
+	// symlinked local/ itself
+	const repo3 = await makeRepo();
+	const elsewhere2 = path.join(tmpBase, 'elsewhere2');
+	await mkdir(elsewhere2);
+	await rm(path.join(repo3.root, 'local'), { recursive: true });
+	await symlink(elsewhere2, path.join(repo3.root, 'local'));
+	await rejects(repo3.store.writeFile(SCENE_PATH, utf8(sceneText()), null), 403, 'forbidden');
+	assert.deepEqual(await readdir(elsewhere2), []);
 });
 
 test('writeFile: two concurrent writers with the same sha — exactly one wins, the other gets 409', async () => {
@@ -348,40 +378,48 @@ test('writeFile: two concurrent writers with the same sha — exactly one wins, 
 	assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
 	const failed = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
 	assert.ok(failed.reason instanceof LocalSaveError && failed.reason.status === 409);
-	assert.deepEqual((await readdir(path.join(repo.root, 'src/data'))).filter((f) => f.endsWith('.tmp')), []);
+	assert.deepEqual((await readdir(path.join(repo.root, 'local'))).filter((f) => f.endsWith('.tmp')), []);
 });
 
 // ---- head token ----------------------------------------------------------------------------------------------
 
-test('head: changes with scene.json, models.json and any public/models glb (added, changed, removed); ignores other files', async () => {
+test('head: changes with local/scene.json, local/models.json and any local/models glb (added, changed, removed); ignores other files and the committed files', async () => {
 	const repo = await makeRepo({ glbs: ['chair'] });
 	const h0 = (await repo.store.head()).head;
 	assert.match(h0, /^[0-9a-f]{40}$/);
 	assert.equal((await repo.store.head()).head, h0, 'stable while nothing changes');
-	await writeFile(path.join(repo.root, 'public/models/notes.txt'), 'x');
-	await writeFile(path.join(repo.root, 'public/models/.hidden.glb.tmp'), 'x');
-	await writeFile(path.join(repo.root, 'public/models/bad id.glb'), 'x');
-	await writeFile(path.join(repo.root, 'src/data/other.json'), '{}');
+	await writeFile(path.join(repo.root, 'local/models/notes.txt'), 'x');
+	await writeFile(path.join(repo.root, 'local/models/.hidden.glb.tmp'), 'x');
+	await writeFile(path.join(repo.root, 'local/models/bad id.glb'), 'x');
+	await writeFile(path.join(repo.root, 'local/other.json'), '{}');
+	// the COMMITTED files (any change to them) are not part of the dev head
+	await writeFile(path.join(repo.root, 'src/data/scene.json'), sceneText([obj('c', 'lamp')]));
+	await writeFile(path.join(repo.root, 'src/data/models.json'), modelsText('zzz'));
+	await writeFile(path.join(repo.root, 'public/models/committed-canary.glb'), Buffer.concat([Buffer.from(GLB), Buffer.alloc(8)]));
+	await writeFile(path.join(repo.root, 'public/models/new-committed.glb'), GLB);
 	assert.equal((await repo.store.head()).head, h0, 'files outside the covered set do not matter');
 	const seen = new Set([h0]);
-	await writeFile(path.join(repo.root, SCENE_PATH), sceneText([obj('a', 'box')]));
+	await writeFile(repo.abs(SCENE_PATH), sceneText([obj('a', 'box')]));
 	seen.add((await repo.store.head()).head);
-	await writeFile(path.join(repo.root, MODELS_PATH), modelsText('chair', 'other'));
+	await writeFile(repo.abs(MODELS_PATH), modelsText('chair', 'other'));
 	seen.add((await repo.store.head()).head);
-	await writeFile(path.join(repo.root, 'public/models/extra.glb'), GLB);
+	await writeFile(repo.abs('public/models/extra.glb'), GLB);
 	seen.add((await repo.store.head()).head);
-	await writeFile(path.join(repo.root, 'public/models/chair.glb'), Buffer.concat([Buffer.from(GLB), Buffer.alloc(4)]));
+	await writeFile(repo.abs('public/models/chair.glb'), Buffer.concat([Buffer.from(GLB), Buffer.alloc(4)]));
 	seen.add((await repo.store.head()).head);
-	await rm(path.join(repo.root, 'public/models/extra.glb'));
+	await rm(repo.abs('public/models/extra.glb'));
 	seen.add((await repo.store.head()).head);
 	assert.equal(seen.size, 6, 'every change produced a different head');
 });
 
-test('head: works with a missing public/models directory and missing data files', async () => {
+test('head: works after local/ (or its files) was deleted: it is re-created empty first; committed dirs are irrelevant', async () => {
 	const repo = await makeRepo();
 	await rm(path.join(repo.root, 'public'), { recursive: true });
-	await rm(path.join(repo.root, MODELS_PATH));
+	await rm(repo.abs(MODELS_PATH));
 	assert.match((await repo.store.head()).head, /^[0-9a-f]{40}$/);
+	await rm(path.join(repo.root, 'local'), { recursive: true });
+	assert.match((await repo.store.head()).head, /^[0-9a-f]{40}$/);
+	assert.equal((await repo.read(MODELS_PATH)).toString(), '[]\n');
 });
 
 // ---- commit --------------------------------------------------------------------------------------------------
@@ -402,13 +440,16 @@ test('commit: writes glbs before models.json, then deletes; reports written/unch
 	assert.equal(result.head, (await repo.store.head()).head);
 	assert.deepEqual(await repo.read('public/models/new.glb'), Buffer.from(GLB));
 	assert.equal((await repo.read(MODELS_PATH)).toString(), modelsText('new'));
-	assert.equal(await stat(path.join(repo.root, 'public/models/old.glb')).catch(() => null), null);
-	// order of the real mutations as observed by onWrite: new.glb, models.json, then old.glb removal
+	assert.equal(await stat(repo.abs('public/models/old.glb')).catch(() => null), null);
+	// order of the real mutations as observed by onWrite: new.glb, models.json, then old.glb removal (all under local/)
 	const finals = repo.touched.filter((p) => !p.endsWith('.tmp')).map((p) => path.relative(repo.root, p));
-	const firstIndex = (rel: string) => finals.indexOf(rel);
-	assert.ok(firstIndex('public/models/new.glb') < firstIndex(MODELS_PATH), 'glb before models.json');
+	const firstIndex = (rel: string) => finals.indexOf(toDisk(rel));
+	assert.ok(firstIndex('public/models/new.glb') >= 0 && firstIndex('public/models/new.glb') < firstIndex(MODELS_PATH), 'glb before models.json');
 	assert.ok(firstIndex(MODELS_PATH) < firstIndex('public/models/old.glb'), 'delete after models.json');
-	assert.deepEqual((await readdir(path.join(repo.root, 'public/models'))).sort(), ['new.glb']);
+	assert.ok(finals.every((p) => p.startsWith(`local${path.sep}`)), `every touched path is under local/: ${finals.join(', ')}`);
+	assert.deepEqual((await readdir(path.join(repo.root, 'local/models'))).sort(), ['new.glb']);
+	// the committed canaries were not touched, and the response keeps the wire paths
+	assert.deepEqual(await snapshotCommitted(repo.root), repo.baseline);
 });
 
 test('commit: unchanged files (same blob sha) are skipped and not rewritten', async () => {
@@ -427,10 +468,10 @@ test('commit: unchanged files (same blob sha) are skipped and not rewritten', as
 test('commit: a stale expectedHead is a 409 and writes nothing', async () => {
 	const repo = await makeRepo({ glbs: ['chair'], models: modelsText('chair') });
 	const { head } = await repo.store.head();
-	await writeFile(path.join(repo.root, SCENE_PATH), sceneText([obj('a', 'box')])); // external edit moves the head
+	await writeFile(repo.abs(SCENE_PATH), sceneText([obj('a', 'box')])); // external edit of local/scene.json moves the head
 	await rejects(repo.store.commit(frame(head, [{ path: 'public/models/n.glb', op: 'write', bytes: GLB }])), 409, 'conflict');
 	await rejects(repo.store.commit(frame('0'.repeat(40), [{ path: 'public/models/n.glb', op: 'write', bytes: GLB }])), 409, 'conflict');
-	assert.equal(await stat(path.join(repo.root, 'public/models/n.glb')).catch(() => null), null);
+	assert.equal(await stat(repo.abs('public/models/n.glb')).catch(() => null), null);
 	assert.equal((await repo.read(SCENE_PATH)).toString(), sceneText([obj('a', 'box')]));
 });
 
@@ -447,7 +488,7 @@ test('commit: validation failures (bad GLB / models.json / scene) reject the WHO
 		await rejects(repo.store.commit(frame(head, changes)), 422, 'rejected');
 		assert.equal((await repo.store.head()).head, before, `${name}: nothing written`);
 	}
-	assert.equal(await stat(path.join(repo.root, 'public/models/a.glb')).catch(() => null), null);
+	assert.equal(await stat(repo.abs('public/models/a.glb')).catch(() => null), null);
 });
 
 test('commit: a path outside the allowlist rejects the whole commit with 403', async () => {
@@ -456,7 +497,7 @@ test('commit: a path outside the allowlist rejects the whole commit with 403', a
 	for (const p of ['package.json', '../x.glb', 'public/models/../../x.glb', '/tmp/x.glb', 'src/data/family.ts']) {
 		await rejects(repo.store.commit(frame(head, [{ path: 'public/models/ok.glb', op: 'write', bytes: GLB }, { path: p, op: 'write', bytes: GLB }])), 403, 'forbidden');
 	}
-	assert.equal(await stat(path.join(repo.root, 'public/models/ok.glb')).catch(() => null), null);
+	assert.equal(await stat(repo.abs('public/models/ok.glb')).catch(() => null), null);
 });
 
 test('commit: a model is not deleted while the scene on disk uses it; allowed once the scene (in the same commit or on disk) drops it', async () => {
@@ -465,28 +506,45 @@ test('commit: a model is not deleted while the scene on disk uses it; allowed on
 	// 1. scene on disk uses it -> refused (422), file stays
 	let { head } = await repo.store.head();
 	await rejects(repo.store.commit(frame(head, [{ path: MODELS_PATH, op: 'write', bytes: utf8(modelsText()) }, del])), 422, 'rejected', /still used/);
-	assert.ok(await stat(path.join(repo.root, 'public/models/chair.glb')));
+	assert.ok(await stat(repo.abs('public/models/chair.glb')));
 	assert.equal((await repo.read(MODELS_PATH)).toString(), modelsText('chair'), 'models.json untouched by the refused commit');
 	// 2. the commit's own scene write still uses it -> refused, even though the disk scene does not
-	await writeFile(path.join(repo.root, SCENE_PATH), sceneText());
+	await writeFile(repo.abs(SCENE_PATH), sceneText());
 	({ head } = await repo.store.head());
 	await rejects(repo.store.commit(frame(head, [{ path: SCENE_PATH, op: 'write', bytes: utf8(sceneText([obj('c1', 'model:chair')])) }, del])), 422, 'rejected', /still used/);
-	assert.ok(await stat(path.join(repo.root, 'public/models/chair.glb')));
+	assert.ok(await stat(repo.abs('public/models/chair.glb')));
 	// 3. the commit's own scene write drops it while the disk scene still uses it -> allowed
-	await writeFile(path.join(repo.root, SCENE_PATH), sceneText([obj('c1', 'model:chair')]));
+	await writeFile(repo.abs(SCENE_PATH), sceneText([obj('c1', 'model:chair')]));
 	({ head } = await repo.store.head());
 	const ok = await repo.store.commit(frame(head, [{ path: SCENE_PATH, op: 'write', bytes: utf8(sceneText()) }, { path: MODELS_PATH, op: 'write', bytes: utf8(modelsText()) }, del]));
 	assert.deepEqual(ok.deleted, ['public/models/chair.glb']);
-	assert.equal(await stat(path.join(repo.root, 'public/models/chair.glb')).catch(() => null), null);
+	assert.equal(await stat(repo.abs('public/models/chair.glb')).catch(() => null), null);
+});
+
+test('commit: the delete guard reads the LOCAL scene — a model the committed scene uses but the local scene does not is deletable, and vice versa', async () => {
+	const repo = await makeRepo({ glbs: ['chair'], models: modelsText('chair'), scene: sceneText() });
+	// the committed canary scene mentions the model, the local one does not
+	await writeFile(path.join(repo.root, 'src/data/scene.json'), sceneText([obj('c1', 'model:chair')]));
+	const before = await snapshotCommitted(repo.root);
+	const { head } = await repo.store.head();
+	const res = await repo.store.commit(frame(head, [{ path: 'public/models/chair.glb', op: 'delete' }]));
+	assert.deepEqual(res.deleted, ['public/models/chair.glb']);
+	assert.deepEqual(await snapshotCommitted(repo.root), before, 'committed files untouched');
+	// now the local scene uses a model, the committed one does not
+	const repo2 = await makeRepo({ glbs: ['chair'], models: modelsText('chair'), scene: sceneText([obj('c1', 'model:chair')]) });
+	await writeFile(path.join(repo2.root, 'src/data/scene.json'), sceneText());
+	const { head: head2 } = await repo2.store.head();
+	await rejects(repo2.store.commit(frame(head2, [{ path: 'public/models/chair.glb', op: 'delete' }])), 422, 'rejected', /still used/);
+	assert.ok(await stat(repo2.abs('public/models/chair.glb')));
 });
 
 test('commit: delete is refused when the scene on disk cannot be read; a delete of a missing glb is tolerated', async () => {
 	const repo = await makeRepo({ glbs: ['chair'], models: modelsText('chair') });
-	await writeFile(path.join(repo.root, SCENE_PATH), 'garbage');
+	await writeFile(repo.abs(SCENE_PATH), 'garbage');
 	const { head } = await repo.store.head();
 	await rejects(repo.store.commit(frame(head, [{ path: 'public/models/chair.glb', op: 'delete' }])), 422, 'rejected');
-	assert.ok(await stat(path.join(repo.root, 'public/models/chair.glb')));
-	await writeFile(path.join(repo.root, SCENE_PATH), sceneText());
+	assert.ok(await stat(repo.abs('public/models/chair.glb')));
+	await writeFile(repo.abs(SCENE_PATH), sceneText());
 	const h2 = (await repo.store.head()).head;
 	const res = await repo.store.commit(frame(h2, [{ path: 'public/models/ghost.glb', op: 'delete' }]));
 	assert.deepEqual(res.deleted, []);
@@ -497,14 +555,15 @@ test('commit: only model files can be deleted (scene.json / models.json delete i
 	const { head } = await repo.store.head();
 	await rejects(repo.store.commit(frame(head, [{ path: SCENE_PATH, op: 'delete' }])), 422, 'rejected');
 	await rejects(repo.store.commit(frame(head, [{ path: MODELS_PATH, op: 'delete' }])), 422, 'rejected');
-	assert.ok(await stat(path.join(repo.root, SCENE_PATH)));
+	assert.ok(await stat(repo.abs(SCENE_PATH)));
+	assert.ok(await stat(path.join(repo.root, SCENE_PATH)), 'the committed scene is still there too');
 });
 
 test('commit: a failure part-way (a symlinked glb target) reports 403 and models.json is not written', async () => {
 	const repo = await makeRepo({ models: modelsText() });
 	const outside = path.join(tmpBase, `outside-${n++}.txt`);
 	await writeFile(outside, 'secret');
-	await symlink(outside, path.join(repo.root, 'public/models/trap.glb'));
+	await symlink(outside, path.join(repo.root, 'local/models/trap.glb'));
 	const { head } = await repo.store.head().catch(() => ({ head: '' }));
 	// head() itself skips symlinks (not regular files), so it works
 	assert.match(head, /^[0-9a-f]{40}$/);
@@ -567,7 +626,7 @@ test('commit: a size field that lies about the data is rejected (no partial writ
 	const { head } = await repo.store.head();
 	const lie = frame(head, [], { expectedHead: head, changes: [{ path: 'public/models/a.glb', op: 'write', size: GLB.byteLength + 10 }] });
 	await rejects(repo.store.commit(Buffer.concat([lie, Buffer.from(GLB)])), 400, 'bad-request');
-	assert.equal(await stat(path.join(repo.root, 'public/models/a.glb')).catch(() => null), null);
+	assert.equal(await stat(repo.abs('public/models/a.glb')).catch(() => null), null);
 });
 
 // ---- the module itself stays dependency free --------------------------------------------------------------------

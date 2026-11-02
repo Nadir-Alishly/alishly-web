@@ -1,11 +1,13 @@
-// DEV ONLY. A GithubClient (github.ts) that reads and writes the working tree through the dev server's
-// /__local-save/ endpoint (dev/local-save-plugin.mjs) instead of GitHub. main.ts loads this file with a dynamic
+// DEV ONLY. A GithubClient (github.ts) that reads and writes the git-ignored local/ folder (local/scene.json,
+// local/models.json, local/models/<id>.glb) through the dev server's /__local-save/ endpoint
+// (dev/local-save-plugin.mjs) instead of GitHub. The paths the client sends are still the repository paths
+// (src/data/scene.json ...); the server maps them onto local/. main.ts loads this file with a dynamic
 // import() inside an `import.meta.env.DEV` branch, so it never reaches `dist`.
 // Pure TypeScript with only erasable syntax and no DOM/three/Astro imports: Node can import it, `fetch` is injected.
 //
 // Mapping: getFile/getFileAt -> GET file, getBlobSha -> GET blob-sha, getHead -> GET head, putFile -> PUT file,
 // commitFiles -> POST commit (one framed body). `sha` is a git blob sha1 and the "head" is an opaque token over
-// scene.json + models.json + public/models, so the conflict handling of the GitHub flow works unchanged.
+// local/scene.json + local/models.json + local/models, so the conflict handling of the GitHub flow works unchanged.
 import type { Wording } from './backend.ts';
 import { GithubError } from './github.ts';
 import type { CommitFilesArgs, FetchLike, GithubClient, GithubErrorKind, PutResult, RemoteFile } from './github.ts';
@@ -24,15 +26,38 @@ export interface LocalClientOptions {
 }
 
 export const LOCAL_WORDING: Wording = {
-	where: 'disk',
-	loaded: 'Loaded the latest scene from disk (src/data/scene.json).',
-	sceneSaved: 'Saved src/data/scene.json — commit & push to publish.',
-	modelsUpToDate: 'The model library on disk was already up to date. Nothing was written.',
-	modelAdded: (label) => `Added "${label}". Place it from "Add to room"; click Save models to write it to disk.`,
-	modelsSaved: (summary) =>
-		`Saved models${summary ? ` (${summary})` : ''} to public/models and src/data/models.json — commit & push to publish.`,
-	ready: 'Dev: saving to disk. "Load latest" re-reads src/data/scene.json.',
+	where: 'disk (local/)',
+	loaded: 'Loaded the latest scene from local/scene.json.',
+	sceneSaved: 'Saved to local/scene.json.',
+	modelsUpToDate: 'The model library in local/ was already up to date. Nothing was written.',
+	modelAdded: (label) => `Added "${label}". Place it from "Add to room"; click Save models to write it to local/models.`,
+	modelsSaved: (summary) => `Saved models${summary ? ` (${summary})` : ''} to local/models and local/models.json.`,
+	ready: 'Dev: saving to local/. "Load latest" re-reads local/scene.json.',
 };
+
+/**
+ * Do local/scene.json or local/models.json differ from the committed src/data files? (The `differs` field of the
+ * `head` route; read-only.) Null when the endpoint cannot say. Never throws.
+ */
+export async function fetchDiffers(options: LocalClientOptions = {}): Promise<boolean | null> {
+	const doFetch: FetchLike = options.fetch ?? ((url, init) => globalThis.fetch(url, init));
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 5000);
+	try {
+		const response = await doFetch(`${options.baseUrl ?? LOCAL_BASE}head`, {
+			cache: 'no-store',
+			headers: { [GUARD_HEADER]: '1' },
+			signal: controller.signal,
+		});
+		if (!response.ok) return null;
+		const body = (await response.json()) as { differs?: unknown } | null;
+		return typeof body?.differs === 'boolean' ? body.differs : null;
+	} catch {
+		return null;
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 export type ProbeResult = { ok: true } | { ok: false; message: string };
 

@@ -40,6 +40,14 @@ const transformFields = [
 		>
 			<header class="shrink-0 space-y-3 border-b border-stone-200 p-5 pb-4">
 				<h1 class="font-heading text-2xl font-semibold">Scene admin</h1>
+				{
+					import.meta.env.DEV && (
+						<p id="dev-local-banner" class="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900 ring-1 ring-amber-200">
+							Dev: using local/ data (not in git)<span id="dev-local-differs" hidden> — differs from committed</span>
+						</p>
+						<p id="dev-local-problem" role="alert" hidden class="rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-900 ring-1 ring-red-200"></p>
+					)
+				}
 				<div role="tablist" aria-label="Sidebar sections" class="grid grid-cols-3 gap-1 rounded-full bg-stone-100 p-1">
 					<button type="button" role="tab" id="tab-room" aria-controls="panel-room" aria-selected="true" tabindex="0" class={tabClass}>This room</button>
 					<button type="button" role="tab" id="tab-all" aria-controls="panel-all" aria-selected="false" tabindex="-1" class={tabClass}>All rooms</button>
@@ -281,7 +289,7 @@ const transformFields = [
 						{
 							import.meta.env.DEV && (
 								<p id="dev-save-note" hidden class="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900 ring-1 ring-amber-200">
-									Dev: saving to disk. Save, Save models and Load latest use the files in this checkout (no token needed); commit &amp; push to publish.
+									Dev: Save, Save models and Load latest read and write the local/ folder (no token needed). Nothing here is committed or pushed.
 								</p>
 							)
 						}

@@ -2,7 +2,7 @@
 // mock request/response objects (no socket, no listening server) and exposes it as a `fetch` stub, the way a browser
 // on http://localhost:4321 would call it. The repo root is a temp dir created by the caller.
 import { EventEmitter } from 'node:events';
-import { Readable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 import localSavePlugin from '../../dev/local-save-plugin.mjs';
 
 export const PORT = 4321;
@@ -17,6 +17,15 @@ export interface Harness {
 	raw: (method: string, url: string, headers: Record<string, string>, body?: Uint8Array | string) => Promise<Response>;
 	logs: Logged[];
 	plugin: ReturnType<typeof localSavePlugin>;
+	/**
+	 * GET/HEAD (or any method) against the SECOND middleware, the `/models/<id>.glb` route (local/models only). The
+	 * response is read from a real Writable, so the plugin's `stream.pipe(res)` works. `next()` => status 599 "NEXT".
+	 */
+	glb: (method: string, url: string, headers?: Record<string, string>) => Promise<Response>;
+	/** Every middleware the plugin registered, in order: [0] = /__local-save/ API, [1] = /models/ route. */
+	handlers: Array<(req: unknown, res: unknown, next: () => void) => unknown>;
+	/** Paths the plugin handed to `server.watcher.add` (only when `watcher: true` was passed). */
+	watched: string[];
 	/** Resolves once the plugin has loaded its core (so the first request does not race the lazy import). */
 	ready: () => Promise<void>;
 }
@@ -26,6 +35,8 @@ export interface HarnessOptions {
 	/** Defaults to the plain loopback dev server. */
 	serverConfig?: { host?: string | boolean; allowedHosts?: unknown };
 	command?: string;
+	/** Give the mock Vite server a `watcher` that records `add()` calls in `harness.watched`. */
+	watcher?: boolean;
 	/** Mock of Vite's `server.environments` (e.g. { ssr: { runner: { import } } }) for the validators-through-runner path. */
 	environments?: unknown;
 }
@@ -39,10 +50,12 @@ export async function makeHarness(options: HarnessOptions): Promise<Harness> {
 		error: (text: string) => logs.push({ level: 'error', text }),
 	};
 	const handlers: Array<(req: unknown, res: unknown, next: () => void) => unknown> = [];
+	const watched: string[] = [];
 	const server = {
 		config: { command: options.command ?? 'serve', root: options.root, logger, server: options.serverConfig ?? {} },
 		environments: options.environments,
 		middlewares: { use: (fn: (typeof handlers)[number]) => handlers.push(fn) },
+		...(options.watcher ? { watcher: { add: (paths: string | string[]) => { watched.push(...(Array.isArray(paths) ? paths : [paths])); } } } : {}),
 	};
 	const plugin = localSavePlugin();
 	await (plugin as unknown as { configureServer: (s: unknown) => unknown }).configureServer(server);
@@ -50,6 +63,9 @@ export async function makeHarness(options: HarnessOptions): Promise<Harness> {
 	const harness: Harness = {
 		logs,
 		plugin,
+		handlers,
+		watched,
+		glb: (method, url, headers = {}) => dispatchStream(handlers[1], method, url, { host: `localhost:${PORT}`, ...headers }),
 		ready: async () => {
 			// the first request awaits the plugin's own readiness; a ping is the cheapest way to wait for it
 			await harness.raw('GET', '/__local-save/ping', { host: `localhost:${PORT}` });
@@ -119,5 +135,53 @@ function dispatch(
 			resolve(new Response('NEXT', { status: 599 })); // not handled by the plugin
 		};
 		Promise.resolve(handlers[0](req, res, next)).catch(reject);
+	});
+}
+
+/** Drives a middleware whose response is a stream (the .glb route): the response is a real Writable. */
+function dispatchStream(
+	handler: (req: unknown, res: unknown, next: () => void) => unknown,
+	method: string,
+	url: string,
+	headers: Record<string, string>,
+): Promise<Response> {
+	const lower: Record<string, string> = {};
+	for (const [k, v] of Object.entries(headers)) lower[k.toLowerCase()] = v;
+	const req = Object.assign(Readable.from([], { objectMode: false }), { method, url, headers: lower, socket: { localPort: PORT, encrypted: false } });
+	return new Promise<Response>((resolve, reject) => {
+		const chunks: Buffer[] = [];
+		let status = 0;
+		let outHeaders: Record<string, string | number> = {};
+		let settled = false;
+		const res = Object.assign(
+			new Writable({
+				write(chunk, _enc, cb) {
+					chunks.push(Buffer.from(chunk));
+					cb();
+				},
+			}),
+			{
+				headersSent: false,
+				writeHead(code: number, h: Record<string, string | number>) {
+					status = code;
+					outHeaders = h;
+					res.headersSent = true;
+				},
+			},
+		);
+		const done = () => {
+			if (settled) return;
+			settled = true;
+			const body = Buffer.concat(chunks);
+			// a Response may not have a body for 204/304 etc.; the plugin only uses 200/403/404/500
+			resolve(new Response(method === 'HEAD' ? null : body, { status, headers: Object.fromEntries(Object.entries(outHeaders).map(([k, v]) => [k, String(v)])) }));
+		};
+		res.on('close', done);
+		res.on('finish', done);
+		const next = () => {
+			settled = true;
+			resolve(new Response('NEXT', { status: 599 }));
+		};
+		Promise.resolve(handler(req, res, next)).catch(reject);
 	});
 }

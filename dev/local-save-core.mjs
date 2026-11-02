@@ -7,10 +7,10 @@
 //
 // Nothing here talks HTTP except `checkRequest` / `checkContentType`, which only look at header objects.
 import { createHash, randomBytes } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { lstat, mkdir, open, readFile, readdir, realpath, rename, unlink } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { link, lstat, mkdir, open, readdir, realpath, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { parseModels, parseScene, validateScene, modelIdOf } from '../src/data/scene.ts';
+import { emptyScene, parseModels, parseScene, serializeScene, validateScene, modelIdOf } from '../src/data/scene.ts';
 import { MAX_MODEL_BYTES, validateGlb } from '../src/scripts/admin/model-file.ts';
 
 export const SERVICE = 'alishly-local-save';
@@ -21,9 +21,29 @@ export const PREFIX = '/__local-save/';
 export const GUARD_HEADER = 'x-alishly-local-save';
 export const GUARD_VALUE = '1';
 
+// The WIRE paths: what the admin client sends and what the allowlist is written in. They are the committed files'
+// names, but in dev nothing is ever read from or written to them (see `diskRel`): everything lives under `local/`.
 export const SCENE_PATH = 'src/data/scene.json';
 export const MODELS_PATH = 'src/data/models.json';
 export const MODELS_DIR = 'public/models';
+
+// Where the data really lives in dev (git-ignored, see .gitignore): local/scene.json, local/models.json, local/models/<id>.glb.
+export const LOCAL_DIR = 'local';
+export const LOCAL_SCENE = 'local/scene.json';
+export const LOCAL_MODELS = 'local/models.json';
+export const LOCAL_MODELS_DIR = 'local/models';
+
+/**
+ * The on-disk (repo-relative) path for an ALLOWLISTED wire path (call `classifyPath` first). A model file keeps its
+ * file name, so the id rule has already been applied by the allowlist.
+ */
+export function diskRel(rel) {
+	if (rel === SCENE_PATH) return LOCAL_SCENE;
+	if (rel === MODELS_PATH) return LOCAL_MODELS;
+	const match = GLB_PATH_RE.exec(rel);
+	if (match) return `${LOCAL_MODELS_DIR}/${match[1]}.glb`;
+	throw new LocalSaveError(403, 'forbidden', 'This path is not one the local save may touch.');
+}
 
 /** Largest single file (scene, models.json or a .glb): the existing model cap. */
 export const MAX_FILE_BYTES = MAX_MODEL_BYTES;
@@ -266,8 +286,8 @@ export function parseCommitBody(buffer, parse = parseModels, maxFile = MAX_FILE_
 const DEFAULT_VALIDATORS = { validateScene, parseScene, parseModels, modelIdOf, validateGlb };
 /** Our own temp files: `.<name>.<12 hex>.tmp`. */
 const TEMP_NAME_RE = {
-	'src/data': /^\.(?:scene|models)\.json\.[0-9a-f]{12}\.tmp$/,
-	[MODELS_DIR]: /^\.([^/\\]+)\.glb\.[0-9a-f]{12}\.tmp$/,
+	[LOCAL_DIR]: /^\.(?:scene|models)\.json\.[0-9a-f]{12}\.tmp$/,
+	[LOCAL_MODELS_DIR]: /^\.([^/\\]+)\.glb\.[0-9a-f]{12}\.tmp$/,
 };
 /** Live per-file cap from the validators (their MAX_MODEL_BYTES), clamped; the imported constant when absent/invalid. */
 const capOf = (v) => {
@@ -297,20 +317,10 @@ export function createLocalSave(options) {
 	let V = DEFAULT_VALIDATORS;
 	/** Per-file cap in force for the current request (live `maxModelBytes` when the validators supply it). */
 	let maxFile = MAX_FILE_BYTES;
-	/** Called first by every public operation. A failure to load validators is a 500 with a plain message. */
-	const refresh = async () => {
-		try {
-			if (options.validators) V = await options.validators();
-			if (typeof options.slugs === 'function') slugs = await options.slugs();
-			maxFile = capOf(V);
-		} catch (error) {
-			throw Object.assign(new LocalSaveError(500, 'internal', 'The local save could not load the scene rules (see the dev server log).'), { cause: error });
-		}
-	};
-
 	let realRootPromise = null;
 	const realRoot = () => (realRootPromise ??= realpath(root));
 
+	/** Absolute path of a repo-relative path (disk form), which must stay inside the repository. */
 	const absOf = (rel) => {
 		const abs = path.join(root, ...rel.split('/'));
 		if (!abs.startsWith(root + path.sep)) throw new LocalSaveError(403, 'forbidden', 'This path is not one the local save may touch.');
@@ -327,53 +337,209 @@ export function createLocalSave(options) {
 		}
 	};
 
-	/** The directory must really be inside the repository (no symlinked directory) and the target a plain file. */
-	const assertSafe = async (rel, abs) => {
-		const dir = path.dirname(abs);
+	/** Is the repo-relative directory `dirRel` a real directory resolving to itself? False when missing; 403 when redirected. */
+	const assertDirSafe = async (dirRel) => {
 		let realDir;
 		try {
-			realDir = await realpath(dir);
+			realDir = await realpath(absOf(dirRel));
 		} catch (error) {
-			if (error && error.code === 'ENOENT') return null; // directory missing: caller decides
+			if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return false; // missing: caller decides
 			throw error;
 		}
-		const expected = path.join(await realRoot(), ...path.dirname(rel).split('/'));
+		const expected = path.join(await realRoot(), ...dirRel.split('/'));
 		if (realDir !== expected) throw new LocalSaveError(403, 'forbidden', 'The target directory is not a plain directory inside the repository.');
+		return true;
+	};
+
+	/**
+	 * The directory must really be inside the repository (no symlinked directory, `local/` and `local/models` included)
+	 * and the target a plain file. `rel` is the repo-relative path that is being touched (disk form, `local/...`; or
+	 * a committed `src/data/...` file for the read-only comparison of `differs`).
+	 */
+	const assertSafe = async (rel, abs) => {
+		if (!(await assertDirSafe(path.posix.dirname(rel)))) return null;
 		const stat = await statOrNull(abs);
 		if (stat && !stat.isFile()) throw new LocalSaveError(403, 'forbidden', 'The target is not a regular file.');
 		return stat;
 	};
 
-	/** Git blob sha of a file of any size (streamed). The upload cap does not apply to hashing what is already on disk. */
-	const hashFile = (abs, size) =>
-		new Promise((resolve, reject) => {
-			const hash = createHash('sha1').update(`blob ${size}\0`);
-			createReadStream(abs)
-				.on('data', (chunk) => hash.update(chunk))
-				.on('error', reject)
-				.on('end', () => resolve(hash.digest('hex')));
+	// --- local/ ---------------------------------------------------------------------------------------------
+
+	const refuseLocal = (what) =>
+		new LocalSaveError(403, 'forbidden', `${what} must be a plain folder inside the repository (not a symlink or a file). Nothing was read or written.`);
+
+	/** Makes sure `rel` (e.g. `local`) is a real directory that resolves to itself inside the repo; creates it when absent. */
+	const ensureDir = async (rel, created) => {
+		const abs = absOf(rel);
+		let stat = await statOrNull(abs);
+		if (!stat) {
+			try {
+				await mkdir(abs); // NOT recursive: the parent was verified just before
+				created.push(`${rel}/`);
+			} catch (error) {
+				if (!error || error.code !== 'EEXIST') throw error;
+			}
+			stat = await lstat(abs);
+		}
+		if (!stat.isDirectory()) throw refuseLocal(`${rel}/`); // a symlink is not isDirectory() under lstat
+		if ((await realpath(abs)) !== path.join(await realRoot(), ...rel.split('/'))) throw refuseLocal(`${rel}/`);
+	};
+
+	/** Creates `rel` with `text` only if it does not exist (temp file + link, so a reader never sees a partial file). */
+	const ensureFile = async (rel, text, created) => {
+		const abs = absOf(rel);
+		const stat = await statOrNull(abs);
+		if (stat) {
+			if (!stat.isFile()) throw new LocalSaveError(403, 'forbidden', `${rel} is not a regular file. Nothing was read or written.`);
+			return;
+		}
+		const tmp = path.join(path.dirname(abs), `.${path.basename(abs)}.${randomBytes(6).toString('hex')}.tmp`);
+		onWrite(abs);
+		onWrite(tmp);
+		try {
+			const handle = await open(tmp, 'wx', 0o644);
+			try {
+				await handle.writeFile(text);
+				await handle.sync();
+			} finally {
+				await handle.close();
+			}
+			try {
+				await link(tmp, abs); // fails with EEXIST instead of replacing anything (also over a dangling symlink)
+				created.push(rel);
+			} catch (error) {
+				if (error && error.code === 'EEXIST') return;
+				// A file system without hard links: exclusive create instead (O_EXCL also refuses an existing symlink).
+				try {
+					const direct = await open(abs, 'wx', 0o644);
+					try {
+						await direct.writeFile(text);
+						await direct.sync();
+					} finally {
+						await direct.close();
+					}
+					created.push(rel);
+				} catch (second) {
+					if (!second || second.code !== 'EEXIST') throw second;
+				}
+			}
+		} finally {
+			await unlink(tmp).catch(() => {});
+			onWrite(tmp);
+			onWrite(abs);
+		}
+	};
+
+	const EMPTY_SCENE_TEXT = serializeScene(emptyScene([]));
+	const EMPTY_MODELS_TEXT = '[]\n';
+
+	let ensuring = null;
+	/**
+	 * Creates whatever of `local/`, `local/models/`, `local/scene.json` (an empty scene) and `local/models.json` (`[]`) is
+	 * missing and never replaces an existing file. Refuses (403) when `local/` or `local/models` is a symlink or resolves
+	 * outside the repository. Concurrent callers share one run. Resolves to the list of things it created.
+	 */
+	const ensureLocal = () => {
+		if (ensuring) return ensuring;
+		ensuring = (async () => {
+			const created = [];
+			await ensureDir(LOCAL_DIR, created);
+			await ensureDir(LOCAL_MODELS_DIR, created);
+			await ensureFile(LOCAL_SCENE, EMPTY_SCENE_TEXT, created);
+			await ensureFile(LOCAL_MODELS, EMPTY_MODELS_TEXT, created);
+			return created;
+		})().finally(() => {
+			ensuring = null;
 		});
+		return ensuring;
+	};
+
+	/** Called first by every public operation. A failure to load validators is a 500 with a plain message. */
+	const refresh = async () => {
+		await ensureLocal();
+		try {
+			if (options.validators) V = await options.validators();
+			if (typeof options.slugs === 'function') slugs = await options.slugs();
+			maxFile = capOf(V);
+		} catch (error) {
+			throw Object.assign(new LocalSaveError(500, 'internal', 'The local save could not load the scene rules (see the dev server log).'), { cause: error });
+		}
+	};
+
+	// O_NONBLOCK: a FIFO swapped in for the file cannot block the open (harmless for regular files, which `fstat` then requires).
+	const NOFOLLOW = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+	/**
+	 * Opens a regular file without following a symlink at the final component (closes the gap between the lstat of
+	 * `assertSafe` and the open). Null when it does not exist; 403 when it is a symlink or not a regular file.
+	 */
+	const openPlain = async (abs) => {
+		let handle;
+		try {
+			handle = await open(abs, NOFOLLOW);
+		} catch (error) {
+			if (error && error.code === 'ENOENT') return null;
+			if (error && error.code === 'ELOOP') throw new LocalSaveError(403, 'forbidden', 'The target is not a regular file.');
+			throw error;
+		}
+		try {
+			const stat = await handle.stat();
+			if (!stat.isFile()) throw new LocalSaveError(403, 'forbidden', 'The target is not a regular file.');
+			return { handle, size: stat.size };
+		} catch (error) {
+			await handle.close().catch(() => {});
+			throw error;
+		}
+	};
+	/** Whole file as bytes through `openPlain`; null when absent. `limit` (bytes) is checked on the opened file. */
+	const readPlainFile = async (abs, limit, tooLarge) => {
+		const opened = await openPlain(abs);
+		if (!opened) return null;
+		try {
+			if (opened.size > limit) throw tooLarge();
+			return await opened.handle.readFile();
+		} finally {
+			await opened.handle.close().catch(() => {});
+		}
+	};
+
+	/** Git blob sha of a file of any size (streamed from the opened file). The upload cap does not apply to hashing what is already on disk. */
+	const hashFile = async (abs) => {
+		const opened = await openPlain(abs);
+		if (!opened) return null;
+		const hash = createHash('sha1').update(`blob ${opened.size}\0`);
+		try {
+			if (opened.size > 0) {
+				for await (const chunk of opened.handle.createReadStream({ autoClose: false, start: 0, end: opened.size - 1 })) hash.update(chunk);
+			}
+		} finally {
+			await opened.handle.close().catch(() => {});
+		}
+		return hash.digest('hex');
+	};
 	// sha cache for .glb files only (scene.json / models.json are tiny and always re-hashed), keyed by size + mtime + inode
 	const shaCache = new Map();
+	/** Blob sha of the `local/` file behind the wire path `rel` (null when absent). */
 	const shaOfFile = async (rel) => {
-		const abs = absOf(rel);
-		const stat = await assertSafe(rel, abs);
+		const disk = diskRel(rel);
+		const abs = absOf(disk);
+		const stat = await assertSafe(disk, abs);
 		if (!stat) return null;
-		if (!rel.endsWith('.glb')) return hashFile(abs, stat.size);
+		if (!disk.endsWith('.glb')) return hashFile(abs);
 		const key = `${stat.size}:${stat.mtimeMs}:${stat.ino}`;
 		const cached = shaCache.get(abs);
 		if (cached && cached.key === key) return cached.sha;
-		const sha = await hashFile(abs, stat.size);
+		const sha = await hashFile(abs);
+		if (sha === null) return null;
 		shaCache.set(abs, { key, sha });
 		return sha;
 	};
 
-	/** Ids of the regular `public/models/<id>.glb` files on disk, sorted. */
+	/** Ids of the regular `local/models/<id>.glb` files on disk, sorted. */
 	const listGlbIds = async () => {
 		let entries;
 		try {
-			const dir = absOf(MODELS_DIR + '/x.glb');
-			entries = await readdir(path.dirname(dir), { withFileTypes: true });
+			if (!(await assertDirSafe(LOCAL_MODELS_DIR))) return []; // a symlinked local/models is refused, not listed
+			entries = await readdir(absOf(LOCAL_MODELS_DIR), { withFileTypes: true });
 		} catch (error) {
 			if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return [];
 			throw error;
@@ -389,7 +555,7 @@ export function createLocalSave(options) {
 
 	const head = async () => {
 		const ids = await listGlbIds();
-		const lines = ['alishly-local-save head v1', `scene ${(await shaOfFile(SCENE_PATH)) ?? '-'}`, `models ${(await shaOfFile(MODELS_PATH)) ?? '-'}`];
+		const lines = ['alishly-local-save head v2', `scene ${(await shaOfFile(SCENE_PATH)) ?? '-'}`, `models ${(await shaOfFile(MODELS_PATH)) ?? '-'}`];
 		for (const id of ids) lines.push(`glb ${id} ${(await shaOfFile(`${MODELS_DIR}/${id}.glb`)) ?? '-'}`);
 		return createHash('sha1').update(lines.join('\n')).digest('hex');
 	};
@@ -402,11 +568,12 @@ export function createLocalSave(options) {
 		return run;
 	};
 
-	/** temp file in the same directory, fsync, rename over the target. */
+	/** temp file in the same directory, fsync, rename over the target. `rel` is the wire path; the file lands in local/. */
 	const atomicWrite = async (rel, bytes) => {
-		const abs = absOf(rel);
-		await mkdir(path.dirname(abs), { recursive: true });
-		await assertSafe(rel, abs);
+		const disk = diskRel(rel);
+		const abs = absOf(disk);
+		await ensureLocal(); // the directories exist (and are plain) even if local/ was removed since the request began
+		await assertSafe(disk, abs);
 		const tmp = path.join(path.dirname(abs), `.${path.basename(abs)}.${randomBytes(6).toString('hex')}.tmp`);
 		onWrite(abs);
 		onWrite(tmp);
@@ -430,8 +597,9 @@ export function createLocalSave(options) {
 	};
 
 	const removeFile = async (rel) => {
-		const abs = absOf(rel);
-		const stat = await assertSafe(rel, abs);
+		const disk = diskRel(rel);
+		const abs = absOf(disk);
+		const stat = await assertSafe(disk, abs);
 		if (!stat) return false;
 		onWrite(abs);
 		try {
@@ -443,22 +611,22 @@ export function createLocalSave(options) {
 		return true;
 	};
 
-	/** Removes temp files an earlier crash left behind (our naming pattern, older than a minute). */
+	/** Removes temp files an earlier crash left behind (our naming pattern, older than a minute), in local/ and local/models. */
 	const sweepStaleTemp = async () => {
 		const removed = [];
 		for (const dir of Object.keys(TEMP_NAME_RE)) {
 			let entries;
 			try {
 				// Same check as every write: a symlinked directory, or one resolving outside the repo, is not swept.
-				await assertSafe(`${dir}/x`, absOf(`${dir}/x`));
-				entries = await readdir(path.dirname(absOf(`${dir}/x`)), { withFileTypes: true });
+				if (!(await assertDirSafe(dir))) continue;
+				entries = await readdir(absOf(dir), { withFileTypes: true });
 			} catch {
 				continue;
 			}
 			for (const entry of entries) {
 				if (!entry.isFile()) continue;
 				const match = TEMP_NAME_RE[dir].exec(entry.name);
-				if (!match || (dir === MODELS_DIR && !isModelId(match[1], V.parseModels))) continue;
+				if (!match || (dir === LOCAL_MODELS_DIR && !isModelId(match[1], V.parseModels))) continue;
 				const rel = `${dir}/${entry.name}`;
 				const abs = absOf(rel);
 				try {
@@ -480,17 +648,82 @@ export function createLocalSave(options) {
 		if (value !== null && !SHA_RE.test(value)) throw new LocalSaveError(400, 'bad-request', 'sha must be a 40-character hex string.');
 	};
 
-	/** Text of scene.json or models.json with its blob sha. */
+	/** Text of scene.json or models.json (the local/ copy) with its blob sha. `path` stays the wire path. */
 	const readText = async (rel) => {
 		await refresh();
 		const info = allowed(rel, V.parseModels);
 		if (info.kind === 'glb') throw new LocalSaveError(403, 'forbidden', 'Model files are not served as text.');
-		const abs = absOf(rel);
-		const stat = await assertSafe(rel, abs);
+		const disk = diskRel(rel);
+		const abs = absOf(disk);
+		const stat = await assertSafe(disk, abs);
 		if (!stat) throw new LocalSaveError(404, 'not-found', 'The file does not exist.');
-		if (stat.size > maxFile) throw new LocalSaveError(413, 'too-large', 'The file is larger than the limit.');
-		const bytes = await readFile(abs);
+		const bytes = await readPlainFile(abs, maxFile, () => new LocalSaveError(413, 'too-large', 'The file is larger than the limit.'));
+		if (!bytes) throw new LocalSaveError(404, 'not-found', 'The file does not exist.');
 		return { path: rel, text: decodeUtf8(bytes, 'The file'), sha: gitBlobSha(bytes) };
+	};
+
+	/**
+	 * Raw text of `local/scene.json` / `local/models.json` for the dev server's module loader (the `?raw` imports of
+	 * src/data). Creates `local/` first. Uses no validators, so it is safe to call while modules are being loaded.
+	 * @param {'scene'|'models'} kind
+	 */
+	const readRaw = async (kind) => {
+		const disk = kind === 'scene' ? LOCAL_SCENE : LOCAL_MODELS;
+		for (let attempt = 0; ; attempt++) {
+			await ensureLocal();
+			const abs = absOf(disk);
+			const stat = await assertSafe(disk, abs);
+			if (!stat) {
+				if (attempt === 0) continue; // removed between ensure and read: ensure creates it again
+				throw new LocalSaveError(404, 'not-found', `${disk} does not exist.`);
+			}
+			const bytes = await readPlainFile(abs, HARD_MAX_FILE_BYTES, () => new LocalSaveError(413, 'too-large', `${disk} is too large.`));
+			if (!bytes) {
+				if (attempt === 0) continue; // removed between the check and the open
+				throw new LocalSaveError(404, 'not-found', `${disk} does not exist.`);
+			}
+			return { text: bytes.toString('utf8'), abs };
+		}
+	};
+
+	/**
+	 * Opens `local/models/<id>.glb` for reading (the dev server's `/models/<id>.glb`). Refuses a symlink (O_NOFOLLOW,
+	 * on top of the directory check) and anything that is not a regular file. Null when the file does not exist.
+	 * The caller owns the returned handle.
+	 */
+	const openGlb = async (id) => {
+		// No refresh(): serving a file needs neither the scene rules nor the slugs (a broken scene.ts must not 500 every
+		// model). The id rule is the last one loaded by any other operation (the imported default before the first).
+		await ensureLocal();
+		if (!isModelId(id, V.parseModels)) return null;
+		const disk = `${LOCAL_MODELS_DIR}/${id}.glb`;
+		const abs = absOf(disk);
+		if (!(await assertSafe(disk, abs))) return null;
+		return openPlain(abs); // null when missing; a symlink or non-file is a 403
+	};
+
+	const COMPARE_MAX = 16 * 1024 * 1024;
+	/** Bytes of a regular file, or null when absent / not plain / too large to compare. */
+	const readPlain = async (rel) => {
+		try {
+			const abs = absOf(rel);
+			if (!(await assertSafe(rel, abs))) return null;
+			return await readPlainFile(abs, COMPARE_MAX, () => new Error('too large to compare'));
+		} catch {
+			return null;
+		}
+	};
+	/**
+	 * Do `local/scene.json` / `local/models.json` differ from the committed `src/data` files? Read-only comparison of
+	 * bytes. A committed file that is missing or not plain counts as different.
+	 */
+	const differs = async () => {
+		await ensureLocal();
+		for (const rel of [SCENE_PATH, MODELS_PATH]) {
+			const [local, committed] = await Promise.all([readPlain(diskRel(rel)), readPlain(rel)]);
+			if (local === null || committed === null || !local.equals(committed)) return true;
+		}
+		return false;
 	};
 
 	return {
@@ -499,6 +732,15 @@ export function createLocalSave(options) {
 		ping: () => ({ ok: true, service: SERVICE, version: API_VERSION }),
 
 		readText,
+
+		/** Creates what is missing of local/ (see ensureLocal above). Resolves to the list of created paths. */
+		ensureLocal,
+		/** Raw text of local/scene.json or local/models.json for the module loader. */
+		readRaw,
+		/** Opens local/models/<id>.glb for the GLB route (see openGlb), or null. */
+		openGlb,
+		/** Do the local scene/models differ from the committed src/data files? */
+		differs,
 
 		/** Git blob sha of an allowlisted file, or null when it does not exist. */
 		async blobSha(rel) {
