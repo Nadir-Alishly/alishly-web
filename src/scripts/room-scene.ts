@@ -43,7 +43,7 @@ export function createRoomScene(canvas: HTMLCanvasElement, initial: RoomConfig):
 
 	return {
 		setRoom(config) {
-			interact.clear(); // closes the popup and puts floated objects back, before the furniture is swapped
+			interact.clear(); // closes the popup and drops the highlight, before the furniture is swapped
 			core.objects.setObjects(config.objects ?? []);
 			core.setRoom(config);
 			interact.setObjects(config.objects ?? []);

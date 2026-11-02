@@ -35,6 +35,18 @@ export interface WallSettings {
 	normalScale: number;
 }
 
+export interface WindowSettings {
+	/** World units per texture repeat of the window wood (frame, sill and muntins). */
+	tile: number;
+	/** Degrees, about the texture's centre (applied on top of the grain running along each bar). */
+	rotation: number;
+	/** Fractions of one texture tile. */
+	offsetX: number;
+	offsetY: number;
+	/** Tint multiplied with the dark-wood texture; white shows the texture as it is. */
+	color: string;
+}
+
 export interface SunSettings {
 	color: string;
 	intensity: number;
@@ -81,6 +93,7 @@ export interface ShadowSettings {
 export interface SceneSettings {
 	floor: FloorSettings;
 	wall: WallSettings;
+	window: WindowSettings;
 	sun: SunSettings;
 	glow: GlowSettings;
 	key: KeySettings;
@@ -89,7 +102,7 @@ export interface SceneSettings {
 }
 
 export type SettingsGroup = keyof SceneSettings;
-export const SETTINGS_GROUPS: readonly SettingsGroup[] = ['floor', 'wall', 'sun', 'glow', 'key', 'fill', 'shadows'];
+export const SETTINGS_GROUPS: readonly SettingsGroup[] = ['floor', 'wall', 'window', 'sun', 'glow', 'key', 'fill', 'shadows'];
 
 const DEG = Math.PI / 180;
 
@@ -108,6 +121,7 @@ const DEFAULT_KEY_ELEVATION = Math.asin(KEY_POSITION[1] / KEY_DISTANCE) / DEG;
 export const DEFAULT_SETTINGS: SceneSettings = {
 	floor: { tile: 3.2, rotation: 0, offsetX: 0, offsetY: 0, roughness: 1.1, envIntensity: 0.35 },
 	wall: { tile: 8, rotation: 0, offsetX: 0, offsetY: 0, normalScale: 2 },
+	window: { tile: 0.8, rotation: 0, offsetX: 0, offsetY: 0, color: '#ffffff' },
 	sun: {
 		color: '#ffe2b8',
 		intensity: 5.2,
@@ -152,6 +166,12 @@ export const SETTING_RANGES: Record<SettingsGroup, Record<string, Range>> = {
 		offsetX: { min: -1, max: 1 },
 		offsetY: { min: -1, max: 1 },
 		normalScale: { min: 0, max: 6 },
+	},
+	window: {
+		tile: { min: 0.1, max: 4 },
+		rotation: { min: -180, max: 180 },
+		offsetX: { min: -1, max: 1 },
+		offsetY: { min: -1, max: 1 },
 	},
 	sun: {
 		intensity: { min: 0, max: 15 },

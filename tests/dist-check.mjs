@@ -91,8 +91,9 @@ const effPalettes = members.map(([s]) => JSON.stringify(expectedColors(s)));
 check(new Set(effPalettes).size === 7, 'all 7 effective colour sets are distinct (override included)');
 check(!palettes.some((p) => /trim/i.test(p)), 'no data-room JSON carries a "trim" colour');
 
-// Texture preloads: room pages and /admin preload the 4 texture URLs (same crossorigin mode as the TextureLoader), the picker none
-const texFiles = ['floor/oak-diff.jpg', 'floor/oak-rough.jpg', 'wall/stucco-detail.jpg', 'wall/stucco-normal.webp'];
+// Texture preloads: room pages and /admin preload the 6 texture URLs (the 4 room maps and the 2 window maps; same crossorigin
+// mode as the TextureLoader), the picker none
+const texFiles = ['floor/oak-diff.jpg', 'floor/oak-rough.jpg', 'wall/stucco-detail.jpg', 'wall/stucco-normal.webp', 'window/dark-wood-diff.jpg', 'window/dark-wood-rough.jpg'];
 const imagePreloads = (html) => [...html.matchAll(/<link\b[^>]*>/g)].map((m) => m[0]).filter((t) => /\brel="preload"/.test(t) && /\bas="image"/.test(t));
 const preloadChecks = (label, html) => {
   const tags = imagePreloads(html);
@@ -102,14 +103,18 @@ const preloadChecks = (label, html) => {
   }
   const normal = tags.find((t) => t.includes('stucco-normal.webp'));
   check(/media="not all and \(pointer: coarse\)"/.test(normal ?? ''), `${label}: the stucco normal preload is skipped on touch screens`);
-  check(tags.length === 4, `${label}: no other image preloads (${tags.length})`);
+  for (const f of ['window/dark-wood-diff.jpg', 'window/dark-wood-rough.jpg']) {
+    const hit = tags.find((t) => t.includes(`href="/textures/${f}"`));
+    check(hit !== undefined && !/\bmedia="/.test(hit), `${label}: the window ${f} preload has no media query (used on every device)`);
+  }
+  check(tags.length === 6, `${label}: no other image preloads (${tags.length})`);
 };
 for (const [slug] of members) preloadChecks(`${slug}`, read(`rooms/${slug}/index.html`));
 preloadChecks('admin', read('admin/index.html'));
 check(!/\/textures\//.test(read('index.html')), 'picker: no texture URL at all (no preload)');
 
 // Room textures: copied from public/ into dist/
-for (const f of ['floor/oak-diff.jpg', 'floor/oak-rough.jpg', 'wall/stucco-detail.jpg', 'wall/stucco-normal.webp']) {
+for (const f of texFiles) {
   const p = join(dist, 'textures', f);
   check(existsSync(p) && statSync(p).size > 10_000, `dist/textures/${f} present`);
 }
@@ -325,8 +330,7 @@ if (adminOk) {
   const bundle = adminJs.map((u) => readFileSync(join(dist, u), 'utf8')).join('\n');
   check(/api\.github\.com/.test(bundle), 'admin bundle talks to api.github.com');
   check(/TransformControls/.test(bundle), 'admin bundle includes TransformControls');
-  check(['Scene settings', 'Floor texture', 'Window glow', 'Advanced shadows', 'Reset to defaults'].every((t) => bundle.includes(t) || admin.includes(t)), 'admin: the settings panel schema (group titles, Reset to defaults) is in the admin page/bundle');
-  for (const id of ['settings-panel', 'room-wall-color', 'room-wall-reset']) check(new RegExp(`id="${id}"`).test(admin), `admin: has #${id}`);
+  check(['Scene settings', 'Floor texture', 'Window wood', 'Window glow', 'Advanced shadows', 'Reset to defaults'].every((t) => bundle.includes(t) || admin.includes(t)), 'admin: the settings panel schema (group titles incl. "Window wood", Reset to defaults) is in the admin page/bundle');  for (const id of ['settings-panel', 'room-wall-color', 'room-wall-reset']) check(new RegExp(`id="${id}"`).test(admin), `admin: has #${id}`);
   check(/<input[^>]*id="room-wall-color"[^>]*type="color"|<input[^>]*type="color"[^>]*id="room-wall-color"/.test(admin), 'admin: wall colour input is type=color');
   check(!/<script[^>]*>[^<]*Floor texture/.test(admin), 'admin: schema text is not inlined into the page');
   // Sidebar tabs (This room | All rooms | Save) and the "Objects in this room" list
@@ -478,7 +482,7 @@ check(!reachFiles.some((p) => /api\.github\.com/.test(read(p))), 'no "api.github
 check(!reachFiles.some((p) => /alishly-admin-token/.test(read(p))), 'no admin token storage key in any JS reachable from public pages');
 check(!reachFiles.some((p) => /index\.astro_astro_type_script/.test(p)), 'admin entry chunk is not reachable from public pages');
 // scene-settings: the admin-only panel schema (labels, hints, grouping) must not ship to the public
-for (const marker of ['Floor texture', 'Advanced shadows', 'Reset to defaults', 'Shadow bias fixes speckles', "Exposure doesn't dim", 'Bump strength', 'Scene settings', 'setting-floor']) {
+for (const marker of ['Floor texture', 'Window wood', 'Advanced shadows', 'Reset to defaults', 'Shadow bias fixes speckles', "Exposure doesn't dim", 'Bump strength', 'Scene settings', 'setting-floor', 'setting-window']) {
   check(!reachFiles.some((p) => read(p).includes(marker)), `no admin settings-panel text "${marker}" in any JS reachable from public pages`);
   check(publicPages.every((f) => !blankData(read(f)).includes(marker)), `no "${marker}" in the HTML of public pages`);
 }

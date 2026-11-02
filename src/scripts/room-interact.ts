@@ -1,19 +1,18 @@
 // Public room pages: objects that carry a note (title + paragraph) react to the pointer.
-//   - Hover (mouse only): the object floats up a little and gets a warm glow outline; cursor: pointer.
+//   - Hover (mouse only): the object gets a warm glow outline and a slight brighten; cursor: pointer. It never moves.
+//     Hover stays live while the camera moves (orbit inertia, zoom, room ease): the frame hook re-picks once per frame.
 //   - Click / tap (a press that moved < CLICK_SLOP px, so not an orbit drag): selects it and opens a popup next to
 //     it (a bottom sheet on narrow screens) with the title, the paragraph and a close button.
 //   - A visually hidden list of buttons (one per note) opens the same popup for keyboard and screen-reader users.
 // Only ever imported by room-scene.ts (public). The popup/list elements live in RoomScene.astro. Note text is put
 // in with textContent / button text only, never as HTML.
 //
-// Rendering is on demand: animation steps run from the core's per-frame hook and paint with requestFrame() (no
-// shadow refresh); invalidate() is called once when the float has settled. Nothing here loops while idle.
+// Rendering is on demand: the core's per-frame hook re-places the popup and re-picks the hover while the camera moves,
+// and paints with requestFrame() (no shadow refresh). Nothing here loops while idle.
 import { BackSide, BufferAttribute, BufferGeometry, Box3, Color, Mesh, Raycaster, ShaderMaterial, Vector2, Vector3 } from 'three';
 import type { Material, OrthographicCamera } from 'three';
 import {
-	advanceProgress,
 	collectNotes,
-	easeOutCubic,
 	highlightedId,
 	isClick,
 	noteButtonLabel,
@@ -21,6 +20,7 @@ import {
 	smoothNormals,
 	SHEET_BREAKPOINT,
 } from '../data/object-note';
+import { canPickHover, pointerPickOwner } from '../data/hover-pick';
 import type { NoteEntry } from '../data/object-note';
 import type { SceneObject } from '../data/scene';
 import type { RoomCore } from './room-core';
@@ -28,9 +28,6 @@ import { catalogEntry } from './room-objects';
 
 /** A press that moves less than this (px) is a click; more is an orbit drag. */
 export const CLICK_SLOP = 5;
-/** How high a highlighted object floats (world units) and how long that takes. */
-export const FLOAT_HEIGHT = 0.08;
-export const FLOAT_MS = 200;
 /** Warm amber glow (sRGB 0..1), as two shells: a soft wide one and a tighter bright one. */
 const GLOW_RGB: [number, number, number] = [0.96, 0.62, 0.04];
 const GLOW_LAYERS = [
@@ -41,13 +38,13 @@ const GLOW_LAYERS = [
 const BRIGHTEN = new Color('#ffb020').multiplyScalar(0.16);
 /** Geometries with more vertices than this are not smoothed for the shell (they use their own normals). */
 const SMOOTH_MAX_VERTICES = 30000;
-const SETTLE_MS = 140;
+const RECENT_MOVE_MS = 50;
 const POPUP_MARGIN = 8;
 const POPUP_GAP = 12;
 const POPUP_MAX_HEIGHT = 384;
 
 export interface RoomInteract {
-	/** Drop the highlight, float and popup (before the objects are swapped). */
+	/** Drop the highlight and popup (before the objects are swapped). */
 	clear(): void;
 	/** The room now has these objects: rebuild what is interactive and the keyboard list. Clears first. */
 	setObjects(objects: readonly SceneObject[]): void;
@@ -100,19 +97,18 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 	let shell: Shell | null = null;
 	let opener: HTMLButtonElement | null = null;
 
-	// Float: per object a 0..1 progress, moved towards 1 for the highlighted object and 0 for the others.
-	const progress = new Map<string, number>();
-	let lastNow = 0;
-	let shadowStale = false;
-
 	const raycaster = new Raycaster();
 	const ndc = new Vector2();
 	const pointer = { x: 0, y: 0, inside: false, mouse: false };
 	let hoverFrame = 0;
-	let settleTimer = 0;
-	let cameraMoving = false;
+	// Camera motion, for the hover re-pick: a controls 'change' since the last frame hook, whether the previous frame
+	// had one, and a pick the pointer handed over to the frame hook (see pointerPickOwner).
+	let cameraMoved = false;
+	let lastMoveAt = -Infinity; // frame time of the last frame with a camera 'change'
+	let deferredPick = false;
+	let mouseButtons = 0; // the mouse buttons last seen down (0 = none): a drag orbits the camera
 
-	// --- Highlight (glow + float) -----------------------------------------------------------------
+	// --- Highlight (glow + brighten) -----------------------------------------------------------------
 
 	// The shell's materials (one per glow layer) and the smoothed geometries are made once and reused for every
 	// highlight; the geometries are freed when the room changes (clear) and everything on dispose.
@@ -226,14 +222,9 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 
 	function setHighlight(id: string | null) {
 		if (id === shownId) return;
-		const previous = shownId;
 		shownId = id;
 		destroyShell();
 		if (id !== null) shell = buildShell(id);
-		if (!reducedMotion()) {
-			if (previous !== null && !progress.has(previous)) progress.set(previous, 1);
-			if (id !== null && !progress.has(id)) progress.set(id, 0);
-		}
 		canvas.style.cursor = hoverId !== null ? 'pointer' : '';
 		core.requestFrame();
 	}
@@ -244,35 +235,24 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 		canvas.style.cursor = hoverId !== null ? 'pointer' : '';
 	}
 
-	/** Core per-frame hook: float steps and popup follow. Returns true while the float is still moving. */
-	function onFrame(now: number): boolean {
-		const dt = lastNow ? Math.min(now - lastNow, 64) : 16;
-		lastNow = now;
-		let animating = false;
-		let changed = false;
-		const reduced = reducedMotion();
-		for (const [id, value] of progress) {
-			const target = id === shownId && !reduced ? 1 : 0;
-			if (value === target) {
-				if (target === 0) progress.delete(id);
-				continue;
-			}
-			const next = advanceProgress(value, target, dt, reduced ? 0 : FLOAT_MS); // reduced motion: snap, never ease
-			core.objects.setLift(id, FLOAT_HEIGHT * easeOutCubic(next));
-			changed = shadowStale = true;
-			progress.set(id, next);
-			if (next !== target) animating = true;
-		}
-		if (changed) core.requestFrame();
-		if (!animating) {
-			lastNow = 0;
-			if (shadowStale) {
-				shadowStale = false;
-				core.invalidate(); // the shadows catch up once, at the final height
-			}
+	/**
+	 * Core per-frame hook: re-picks the hover while the camera moves (once per frame, from the camera as it is now) and
+	 * keeps the popup on its object. Nothing is animating here, so it always returns false.
+	 */
+	function onFrame(now: number, movedByCore: boolean): boolean {
+		// The controls' 'change' covers drag, wheel and damping; the core also reports the home ease of a room switch,
+		// which moves the camera without any 'change'.
+		const moved = cameraMoved || movedByCore;
+		const pickNow = moved || deferredPick;
+		if (moved) lastMoveAt = now;
+		cameraMoved = false;
+		deferredPick = false;
+		if (pickNow && canPickHover(pickState())) {
+			core.camera.updateMatrixWorld(); // the render that refreshes it comes after this hook
+			setHover(pick(pointer.x, pointer.y));
 		}
 		if (selectedId !== null) positionPopup();
-		return animating;
+		return false;
 	}
 
 	// --- Popup ----------------------------------------------------------------------------------------
@@ -293,9 +273,6 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 		if (!holder) return null;
 		const box = new Box3().setFromObject(holder);
 		if (box.isEmpty()) return null;
-		const lift = FLOAT_HEIGHT * easeOutCubic(progress.get(id) ?? 0);
-		box.min.y -= lift;
-		box.max.y -= lift;
 		return box;
 	}
 
@@ -338,7 +315,6 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 		}
 		if (measuredFor !== `${width}x${height}|${selectedId}`) measure();
 		if (!anchorBox || anchorBox.isEmpty()) anchorBox = restBox(selectedId); // a model that has just loaded
-		const lift = FLOAT_HEIGHT * easeOutCubic(progress.get(selectedId) ?? 0);
 		// Project the object's box. Its screen-space extent is the anchor; the bottom edge is the mean of the base's
 		// centre and its lowest corner, because the box's front-bottom corner sits well below a tall object's visible foot.
 		core.camera.updateMatrixWorld();
@@ -357,7 +333,7 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 			for (const x of [box.min.x, box.max.x]) {
 				for (const y of [box.min.y, box.max.y]) {
 					for (const z of [box.min.z, box.max.z]) {
-						const [sx, sy] = project(x, y + lift, z);
+						const [sx, sy] = project(x, y, z);
 						minX = Math.min(minX, sx);
 						maxX = Math.max(maxX, sx);
 						minY = Math.min(minY, sy);
@@ -366,7 +342,7 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 					}
 				}
 			}
-			const [, baseCentre] = project((box.min.x + box.max.x) / 2, box.min.y + lift, (box.min.z + box.max.z) / 2);
+			const [, baseCentre] = project((box.min.x + box.max.x) / 2, box.min.y, (box.min.z + box.max.z) / 2);
 			fullMaxY = maxY;
 			maxY = (baseCentre + baseLow) / 2;
 		} else {
@@ -505,10 +481,35 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 		applyHighlight();
 	}
 
+	const pickState = () => ({
+		disposed,
+		inside: pointer.inside,
+		mouse: pointer.mouse,
+		// The mouse buttons are refreshed by every pointer event, so a lost pointerup cannot leave hover off for good
+		// (the `active` pointer set is only for click detection).
+		dragging: mouseButtons !== 0,
+	});
+
 	function pickHover() {
 		hoverFrame = 0;
-		if (disposed || !pointer.inside || !pointer.mouse || cameraMoving) return;
+		if (!canPickHover(pickState())) return;
+		// "Moved in the last frame" = within a few frame times: once the camera has been still for longer there is no
+		// frame coming, and the pointer picks on its own instead of forcing a repaint just to pick.
+		const movedRecently = performance.now() - lastMoveAt < RECENT_MOVE_MS;
+		if (pointerPickOwner(cameraMoved, movedRecently) === 'frame') {
+			// The camera is moving: the frame hook picks, once per frame, with the camera as that frame leaves it.
+			deferredPick = true;
+			core.requestFrame();
+			return;
+		}
 		setHover(pick(pointer.x, pointer.y));
+	}
+
+	/** One pick in the next frame under the last pointer position (if hover is possible now), e.g. after the room's objects changed. */
+	function requestPick() {
+		if (!canPickHover(pickState())) return;
+		deferredPick = true;
+		core.requestFrame();
 	}
 
 	function scheduleHover() {
@@ -521,6 +522,8 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 		pointer.mouse = event.pointerType === 'mouse';
 		pointer.inside = true;
 		if (!pointer.mouse) return;
+		mouseButtons = event.buttons;
+		if (event.buttons === 0 && active.delete(event.pointerId) && press?.id === event.pointerId) press = null; // a press whose pointerup never came
 		if (event.buttons !== 0) {
 			// A drag (pointer capture keeps the moves coming to the canvas): no hover while orbiting.
 			setHover(null);
@@ -538,6 +541,7 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 	const active = new Set<number>();
 	let press: { id: number; x: number; y: number; valid: boolean } | null = null;
 	const onPointerDown = (event: PointerEvent) => {
+		if (event.pointerType === 'mouse') mouseButtons = event.buttons;
 		active.add(event.pointerId);
 		if (active.size > 1) {
 			if (press) press.valid = false; // a second finger: pinch/rotate, not a tap
@@ -547,6 +551,14 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 	};
 	const onPointerUp = (event: PointerEvent) => {
 		active.delete(event.pointerId);
+		if (event.pointerType === 'mouse') {
+			// Released: the highlight comes back at once, without waiting for a mouse move or the camera to stop.
+			mouseButtons = event.buttons;
+			pointer.x = event.clientX;
+			pointer.y = event.clientY;
+			pointer.mouse = true;
+			scheduleHover();
+		}
 		const start = press;
 		if (start && start.id === event.pointerId) press = null;
 		if (!start || start.id !== event.pointerId || !start.valid || event.button !== 0) return;
@@ -560,18 +572,18 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 	};
 	const onPointerCancel = (event: PointerEvent) => {
 		active.delete(event.pointerId);
+		if (event.pointerType === 'mouse') {
+			mouseButtons = 0;
+			scheduleHover();
+		}
 		if (press && press.id === event.pointerId) press = null;
 	};
 
-	// The camera moved (drag, wheel, damping, room tween): no hover until it has been still for a moment.
+	// The camera moved (drag, wheel, damping, room tween): the frame hook re-picks under the pointer once per frame.
+	// The hover is not dropped here, so it follows whatever is under the cursor while the camera glides. During a drag
+	// there is no pick (canPickHover); the release does one.
 	const onCameraChange = () => {
-		cameraMoving = true;
-		setHover(null);
-		clearTimeout(settleTimer);
-		settleTimer = window.setTimeout(() => {
-			cameraMoving = false;
-			if (!disposed && pointer.inside && pointer.mouse && !active.size) scheduleHover();
-		}, SETTLE_MS);
+		cameraMoved = true;
 	};
 
 	const onKeyDown = (event: KeyboardEvent) => {
@@ -604,6 +616,8 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 	areaObserver.observe(layer);
 	core.setFrameHook(onFrame);
 	core.objects.onLoad = (id) => {
+		// A model that has just arrived may be under a resting pointer: pick once more (one frame, no loop).
+		requestPick();
 		if (id === selectedId) {
 			anchorBox = restBox(id);
 			core.requestFrame();
@@ -622,14 +636,6 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 		else applyHighlight();
 		setHighlight(null);
 		releaseShellCache();
-		// Back to rest at once (the objects may be about to be replaced).
-		for (const id of progress.keys()) core.objects.setLift(id, 0);
-		progress.clear();
-		lastNow = 0;
-		if (shadowStale) {
-			shadowStale = false;
-			core.invalidate();
-		}
 		canvas.style.cursor = '';
 	}
 
@@ -640,13 +646,13 @@ export function createRoomInteract(core: RoomCore, canvas: HTMLCanvasElement): R
 			clear();
 			notes = new Map(collectNotes(objects, (type) => catalogEntry(type)?.label).map((entry) => [entry.id, entry]));
 			rebuildList();
+			requestPick(); // the pointer may be resting on an object of the new room
 		},
 		dispose() {
 			if (disposed) return;
 			clear();
 			disposed = true;
 			cancelAnimationFrame(hoverFrame);
-			clearTimeout(settleTimer);
 			canvas.removeEventListener('pointermove', onPointerMove);
 			canvas.removeEventListener('pointerleave', onPointerLeave);
 			canvas.removeEventListener('pointerdown', onPointerDown);

@@ -456,6 +456,8 @@ export function mountAdmin(root: HTMLElement) {
 		client: () => client(),
 		scenePath: () => (import.meta.env.DEV ? DEFAULT_TARGET.path : readTarget().path),
 		wording: () => wording,
+		onPreview: (glb, defaultScale) => editor?.setImportPreview(glb, defaultScale),
+		onPreviewScale: (defaultScale) => editor?.setImportPreviewScale(defaultScale),
 		onCatalogChange: () => {
 			renderCatalog();
 			refreshObjectList(); // model labels may have changed

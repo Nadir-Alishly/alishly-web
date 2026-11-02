@@ -35,3 +35,24 @@ export function boxUvs(positions: ArrayLike<number>, normals: ArrayLike<number>,
 	}
 	return uvs;
 }
+
+const UV_V_AXIS = { x: 1, y: 2, z: 1 } as const; // world axis a face's v runs along, by dominant normal axis (see worldUv)
+
+/**
+ * Like boxUvs, but for a bar whose long side runs along world axis `longAxis` (0 x, 1 y, 2 z): on every face where
+ * that axis is v, the uv is turned a quarter (not mirrored), so a texture whose grain runs along u keeps its grain
+ * along the bar instead of across it. Faces where the long axis is u, or the face normal, are left as boxUvs gives them.
+ */
+export function barUvs(positions: ArrayLike<number>, normals: ArrayLike<number>, tile: number, longAxis: 0 | 1 | 2): number[] {
+	const uvs = boxUvs(positions, normals, tile);
+	for (let i = 0; i < uvs.length; i += 2) {
+		const [nx, ny, nz] = [normals[(i / 2) * 3], normals[(i / 2) * 3 + 1], normals[(i / 2) * 3 + 2]];
+		const [ax, ay, az] = [Math.abs(nx), Math.abs(ny), Math.abs(nz)];
+		const dominant = ax >= ay && ax >= az ? 'x' : az >= ay ? 'z' : 'y';
+		if (UV_V_AXIS[dominant] !== longAxis) continue;
+		const u = uvs[i];
+		uvs[i] = uvs[i + 1];
+		uvs[i + 1] = -u;
+	}
+	return uvs;
+}

@@ -1,14 +1,32 @@
 #!/usr/bin/env bash
-# Builds the room textures in public/textures/ from the 1k Poly Haven-style PNG sets (oak_wood_planks_*, white_stucco_*).
+# Builds the room textures in public/textures/ from the 1k Poly Haven-style PNG sets (oak_wood_planks_*, white_stucco_*, dark_wood_*).
 # Needs magick (ImageMagick with webp + jpeg) and python3 with numpy + PIL. Run from anywhere:
-#   scripts/make-textures.sh <oak-src-dir> <stucco-src-dir>
-# e.g. scripts/make-textures.sh "$HOME/Downloads/floor oak/textures" "$HOME/Downloads/wall/textures"
-# Only diff + rough (oak) and diff + nor_gl (stucco) are used; AO, ARM, displacement and the oak normal are not.
+#   scripts/make-textures.sh <oak-src-dir> <stucco-src-dir> [<dark-wood-src-dir>]
+#   scripts/make-textures.sh --window-only <dark-wood-src-dir>      (only public/textures/window/, leaves the rest alone)
+# e.g. scripts/make-textures.sh "$HOME/Downloads/floor oak/textures" "$HOME/Downloads/wall/textures" "$HOME/Downloads/dark_wood_1k/textures"
+# Only diff + rough (oak, dark wood) and diff + nor_gl (stucco) are used; AO, ARM, displacement and the other normals are not.
 set -euo pipefail
-OAK="${1:?usage: make-textures.sh <oak-src-dir> <stucco-src-dir>}"
-STUCCO="${2:?usage: make-textures.sh <oak-src-dir> <stucco-src-dir>}"
+USAGE="usage: make-textures.sh <oak-src-dir> <stucco-src-dir> [<dark-wood-src-dir>] | --window-only <dark-wood-src-dir>"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$HERE/../public/textures"
+
+window() {
+	local src="$1"
+	mkdir -p "$OUT/window"
+	# Window wood albedo (sRGB; 512² is plenty for thin bars). The 16-bit source goes to 8 bit; metadata and ICC stripped.
+	magick "$src/dark_wood_diff_1k.png" -depth 8 -strip -resize 512x512 -quality 85 "$OUT/window/dark-wood-diff.jpg"
+	# Window wood roughness: one channel (three reads G); no normal map for the window.
+	magick "$src/dark_wood_rough_1k.png" -depth 8 -colorspace Gray -strip -resize 512x512 -quality 90 "$OUT/window/dark-wood-rough.jpg"
+	ls -l "$OUT/window"
+}
+
+if [ "${1:-}" = "--window-only" ]; then
+	window "${2:?$USAGE}"
+	exit 0
+fi
+
+OAK="${1:?$USAGE}"
+STUCCO="${2:?$USAGE}"
 mkdir -p "$OUT/floor" "$OUT/wall"
 
 # Oak albedo (sRGB; the room's tint is a material colour). Metadata and ICC stripped.
@@ -22,3 +40,4 @@ magick "$STUCCO/white_stucco_nor_gl_1k.png" -depth 8 -strip -alpha off -resize 5
 	-define webp:lossless=true -define webp:method=6 "$OUT/wall/stucco-normal.webp"
 
 ls -l "$OUT/floor" "$OUT/wall"
+if [ -n "${3:-}" ]; then window "$3"; fi

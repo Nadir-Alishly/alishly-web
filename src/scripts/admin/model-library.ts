@@ -1,6 +1,7 @@
 // The "Model library" panel of /admin: import a .glb (or a .gltf with its files), list the models, delete
 // them, and "Save models" (one commit). Imports and deletes are staged here until then. Everything that
 // comes from files or GitHub goes through textContent only.
+import { previewDefaultScale } from '../../data/import-preview';
 import { LIMITS, modelIdOf } from '../../data/scene';
 import type { ModelEntry, SceneData } from '../../data/scene';
 import { getCatalog } from '../room-objects';
@@ -43,6 +44,13 @@ export interface ModelLibraryOptions {
 	scenePath(): string;
 	/** The set of models changed (palette needs a rebuild). */
 	onCatalogChange(): void;
+	/**
+	 * The import form's live preview: a model was picked (`glb`, the form's scale) or the form closed (`null`). It is
+	 * not scene data; the editor shows a ghost of it in the room.
+	 */
+	onPreview?(glb: ArrayBuffer | null, defaultScale: number): void;
+	/** The form's scale was edited to a valid number: the ghost resizes. */
+	onPreviewScale?(defaultScale: number): void;
 	/** Where the models are saved, for messages; read at use time. Defaults to the GitHub wording. */
 	wording?(): Wording;
 }
@@ -228,6 +236,7 @@ export function mountModelLibrary(options: ModelLibraryOptions): ModelLibrary {
 	const hideForm = () => {
 		draft = null;
 		form.hidden = true;
+		options.onPreview?.(null, 1); // Add, Cancel or a new pick: the ghost goes
 	};
 
 	async function readPicked(files: File[]): Promise<{ bytes: Uint8Array; filename: string }> {
@@ -280,6 +289,7 @@ export function mountModelLibrary(options: ModelLibraryOptions): ModelLibrary {
 			scaleInput.value = String(suggestedScale(size));
 			formInfo.textContent = `Size ${size.map((n) => Number(n.toPrecision(3))).join(' × ')} (model units), ${(bytes.byteLength / 1024 / 1024).toFixed(1)} MB.`;
 			form.hidden = false;
+			options.onPreview?.(toArrayBuffer(bytes), previewDefaultScale(scaleInput.value) ?? 1);
 			setStatus('Check the name and scale, then click Add.');
 		} catch (error) {
 			if (!(error instanceof ModelFileError)) console.error(error);
@@ -335,6 +345,11 @@ export function mountModelLibrary(options: ModelLibraryOptions): ModelLibrary {
 	cancelButton.addEventListener('click', () => {
 		hideForm();
 		setStatus('');
+	});
+	scaleInput.addEventListener('input', () => {
+		if (!draft) return;
+		const scale = previewDefaultScale(scaleInput.value);
+		if (scale !== null) options.onPreviewScale?.(scale); // blank or not a number: the ghost keeps its size
 	});
 	for (const input of [nameInput, scaleInput]) {
 		input.addEventListener('keydown', (event) => {

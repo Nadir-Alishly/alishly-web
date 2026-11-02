@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
 	hasNote, collectNotes, noteButtonLabel, highlightedId, isClick, isNarrow, SHEET_BREAKPOINT,
-	easeOutCubic, advanceProgress, placePopup, smoothNormals,
+	placePopup, smoothNormals,
 } from '../src/data/object-note.ts';
 import type { PlaceInput } from '../src/data/object-note.ts';
 
@@ -95,31 +95,7 @@ test('isNarrow: bottom sheet below 640 px only', () => {
 	assert.equal(isNarrow(1280), false);
 });
 
-// ---------- float easing ----------
-
-test('easeOutCubic: 0 -> 0, 1 -> 1, monotonic, clamped', () => {
-	assert.equal(easeOutCubic(0), 0);
-	assert.equal(easeOutCubic(1), 1);
-	assert.equal(easeOutCubic(-3), 0);
-	assert.equal(easeOutCubic(9), 1);
-	let prev = -1;
-	for (let t = 0; t <= 1.0001; t += 0.05) { const v = easeOutCubic(t); assert.ok(v >= prev); prev = v; }
-	assert.ok(easeOutCubic(0.5) > 0.5, 'eases out');
-});
-
-test('advanceProgress: moves at 1/duration per ms, stops at the target, reverses mid-way, jumps for duration 0', () => {
-	assert.equal(advanceProgress(0, 1, 100, 200), 0.5);
-	assert.equal(advanceProgress(0.5, 1, 100, 200), 1);
-	assert.equal(advanceProgress(0.9, 1, 1000, 200), 1, 'no overshoot');
-	assert.equal(advanceProgress(0.5, 0, 50, 200), 0.25, 'reverse');
-	assert.equal(advanceProgress(0.1, 0, 1000, 200), 0, 'no undershoot');
-	assert.equal(advanceProgress(1, 1, 16, 200), 1);
-	assert.equal(advanceProgress(0, 0, 16, 200), 0);
-	assert.equal(advanceProgress(0.3, 1, 16, 0), 1, 'reduced motion: jump');
-	assert.equal(advanceProgress(0.7, 0, 16, 0), 0);
-	assert.equal(advanceProgress(0.2, 1, -50, 200), 0.2, 'negative dt never goes backwards');
-});
-
+// The hover float is gone (no lift on hover or select): the object-note module keeps no easing or progress helpers.
 // ---------- popup placement: clamp / flip / scroll ----------
 
 const base = (over: Partial<PlaceInput> & { anchor?: Partial<PlaceInput['anchor']>; size?: Partial<PlaceInput['size']> } = {}): PlaceInput => ({

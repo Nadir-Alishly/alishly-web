@@ -1,5 +1,5 @@
 // Pure logic of the public room's object notes (title + paragraph): which objects are interactive, which one is
-// highlighted, click vs drag, the hover float and where the popup goes.
+// highlighted, click vs drag and where the popup goes.
 // Pure TypeScript with only erasable syntax and no imports (no DOM/three/Astro), so Node can import it directly
 // (`node --test`). The DOM/three wiring lives in scripts/room-interact.ts.
 
@@ -74,22 +74,6 @@ export function isClick(down: { x: number; y: number }, up: { x: number; y: numb
 /** Narrow screens (< 640 px, Tailwind's `sm`) get a bottom sheet instead of an anchored popup. */
 export const SHEET_BREAKPOINT = 640;
 export const isNarrow = (width: number): boolean => width < SHEET_BREAKPOINT;
-
-// --- Hover float -----------------------------------------------------------------------------
-
-export const easeOutCubic = (t: number): number => 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 3);
-
-/**
- * Moves a 0..1 progress value towards `target` (0 or 1) at 1 / `durationMs` per millisecond. Works from wherever
- * it is, so reversing mid-float simply turns around. With `durationMs <= 0` it jumps.
- */
-export function advanceProgress(progress: number, target: number, dtMs: number, durationMs: number): number {
-	if (durationMs <= 0) return target;
-	const step = Math.max(0, dtMs) / durationMs;
-	if (progress < target) return Math.min(target, progress + step);
-	if (progress > target) return Math.max(target, progress - step);
-	return target;
-}
 
 // --- Popup placement ----------------------------------------------------------------------------
 

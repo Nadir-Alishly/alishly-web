@@ -231,6 +231,22 @@ const templates = new Map<string, Promise<Object3D>>();
 // Models added while the admin is open load through their own function (they are read from memory).
 const loaders = new Map<string, () => Promise<Object3D>>();
 
+/**
+ * Re-centres a loaded model on x/z and rests it on y = 0, so models behave like the primitives, and records its native size
+ * (`userData.nativeSize`) on the wrapper it returns. Also used by the admin's import preview.
+ */
+export function prepareTemplate(content: Object3D): Group {
+	const bounds = new Box3().setFromObject(content);
+	content.position.x -= (bounds.min.x + bounds.max.x) / 2;
+	content.position.z -= (bounds.min.z + bounds.max.z) / 2;
+	content.position.y -= bounds.min.y;
+	const wrapper = new Group();
+	wrapper.add(content);
+	const nativeSize = boxSize(bounds);
+	if (nativeSize) wrapper.userData.nativeSize = nativeSize;
+	return wrapper;
+}
+
 function loadTemplate(modelId: string): Promise<Object3D> {
 	const cached = templates.get(modelId);
 	if (cached) return cached;
@@ -244,16 +260,7 @@ function loadTemplate(modelId: string): Promise<Object3D> {
 			const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
 			content = (await new GLTFLoader().loadAsync(entry.file)).scene;
 		}
-		// Re-centre on x/z and rest on y = 0, so models behave like the primitives.
-		const bounds = new Box3().setFromObject(content);
-		content.position.x -= (bounds.min.x + bounds.max.x) / 2;
-		content.position.z -= (bounds.min.z + bounds.max.z) / 2;
-		content.position.y -= bounds.min.y;
-		const wrapper = new Group();
-		wrapper.add(content);
-		const nativeSize = boxSize(bounds);
-		if (nativeSize) wrapper.userData.nativeSize = nativeSize;
-		return wrapper;
+		return prepareTemplate(content);
 	})();
 	templates.set(modelId, promise);
 	promise.catch(() => templates.delete(modelId));
@@ -280,7 +287,7 @@ export function removeModelEntry(id: string): Promise<Object3D> | undefined {
 	return template;
 }
 
-function instantiateModel(template: Object3D, defaultScale: number): Group {
+export function instantiateModel(template: Object3D, defaultScale: number): Group {
 	const inner = new Group();
 	inner.scale.setScalar(defaultScale);
 	inner.userData.sharedGeometry = true; // geometry belongs to the template
@@ -330,7 +337,7 @@ function buildMissingModel(): Group {
 // --- Disposal and picking ----------------------------------------------------------------------
 
 /** Frees what one object owns: its materials always, its geometry unless it belongs to a shared template. */
-function disposeInstance(node: Object3D, shared = false) {
+export function disposeInstance(node: Object3D, shared = false) {
 	const isShared = shared || node.userData.sharedGeometry === true;
 	const { geometry, material } = node as Partial<Mesh>;
 	if (!isShared) geometry?.dispose();
@@ -354,11 +361,6 @@ export interface ObjectManager {
 	update(object: SceneObject): void;
 	remove(id: string): void;
 	get(id: string): Object3D | undefined;
-	/**
-	 * Raise an object by `y` world units above where its data puts it (hover float); 0 = at rest. The offset
-	 * is remembered and re-applied by update(); remove()/replaceAll() forget it. Does not invalidate: the caller paints.
-	 */
-	setLift(id: string, y: number): void;
 	/** Id of the object the ray hits first, or null. */
 	idAt(raycaster: Raycaster): string | null;
 	dispose(): void;
@@ -371,7 +373,6 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 	const holders = new Map<string, Group>();
 	// The most recent data per object, so a late-finishing model load applies the current colour.
 	const latest = new Map<string, SceneObject>();
-	const lifts = new Map<string, number>();
 	const current = (id: string) => latest.get(id);
 
 	let signature: string | null = null;
@@ -389,7 +390,6 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 
 	const applyTransform = (holder: Group, object: SceneObject) => {
 		holder.position.set(...object.position);
-		holder.position.y += lifts.get(object.id) ?? 0;
 		holder.rotation.set(
 			MathUtils.degToRad(object.rotation[0]),
 			MathUtils.degToRad(object.rotation[1]),
@@ -455,7 +455,6 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 		disposeInstance(holder);
 		holders.delete(id);
 		latest.delete(id);
-		lifts.delete(id);
 		onChange();
 	}
 
@@ -487,15 +486,6 @@ export function createObjectManager(onChange: () => void): ObjectManager {
 		},
 		remove,
 		get: (id) => holders.get(id),
-		setLift(id, y) {
-			const holder = holders.get(id);
-			const object = latest.get(id);
-			if (!holder || !object) return;
-			if (y === 0) lifts.delete(id);
-			else lifts.set(id, y);
-			holder.position.y = object.position[1] + y;
-			holder.updateMatrixWorld(true);
-		},
 		idAt(raycaster) {
 			const hit = raycaster.intersectObjects(root.children, true)[0];
 			for (let node: Object3D | null = hit?.object ?? null; node; node = node.parent) {

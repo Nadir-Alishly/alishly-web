@@ -7,7 +7,7 @@ import type { ModelEntry, Vec3 } from '../../data/scene';
 import { addModelEntry, removeModelEntry } from '../room-objects';
 
 /** Loads a GLB from memory (no request). `path` is empty on purpose: the model has no external files. */
-async function parseGlb(buffer: ArrayBuffer): Promise<Object3D> {
+export async function parseGlb(buffer: ArrayBuffer): Promise<Object3D> {
 	const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
 	const gltf = await new GLTFLoader().parseAsync(buffer.slice(0), '');
 	if (!gltf.scene) throw new Error('The model has no visible geometry.');
@@ -15,7 +15,7 @@ async function parseGlb(buffer: ArrayBuffer): Promise<Object3D> {
 }
 
 /** Frees everything a loaded model owns: geometries, materials and their textures. */
-function disposeTemplate(root: Object3D) {
+export function disposeTemplate(root: Object3D) {
 	const textures = new Set<Texture>();
 	root.traverse((node) => {
 		const { geometry, material } = node as Partial<Mesh>;

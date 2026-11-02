@@ -55,6 +55,18 @@ const SCHEMA: GroupDef[] = [
 		],
 	},
 	{
+		group: 'window',
+		title: 'Window wood',
+		hint: 'The dark-wood grain on the window frame, sill and bars. White shows the wood as it is; other colours tint it.',
+		controls: [
+			{ kind: 'number', key: 'tile', label: 'Tile size', step: 0.05, unit: 'units' },
+			{ kind: 'number', key: 'rotation', label: 'Rotation', step: 1, unit: '°' },
+			{ kind: 'number', key: 'offsetX', label: 'Offset X', step: 0.01 },
+			{ kind: 'number', key: 'offsetY', label: 'Offset Y', step: 0.01 },
+			{ kind: 'color', key: 'color', label: 'Tint' },
+		],
+	},
+	{
 		group: 'sun',
 		title: 'Sun',
 		hint: 'The angles are limited to where sunlight can only come in through the window.',

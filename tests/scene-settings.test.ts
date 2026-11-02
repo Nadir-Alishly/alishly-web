@@ -33,6 +33,7 @@ test('DEFAULT_SETTINGS equals today\'s hard-coded look (constants of the old roo
 	const d = DEFAULT_SETTINGS;
 	assert.deepEqual(d.floor, { tile: 3.2, rotation: 0, offsetX: 0, offsetY: 0, roughness: 1.1, envIntensity: 0.35 });
 	assert.deepEqual(d.wall, { tile: 8, rotation: 0, offsetX: 0, offsetY: 0, normalScale: 2 });
+	assert.deepEqual(d.window, { tile: 0.8, rotation: 0, offsetX: 0, offsetY: 0, color: '#ffffff' });
 	assert.equal(d.sun.color, '#ffe2b8');
 	assert.equal(d.sun.intensity, 5.2);
 	assert.equal(d.sun.shadowRadius, 4);
@@ -62,7 +63,7 @@ test('every default sits inside its range, every numeric setting has a range and
 	const numeric = new Set(numericKeys().map(([g, k]) => `${g}.${k}`));
 	for (const g of SETTINGS_GROUPS) for (const k of Object.keys(SETTING_RANGES[g])) assert.ok(numeric.has(`${g}.${k}`), `range ${g}.${k} belongs to a numeric setting`);
 	for (const [g, k] of colorKeys()) assert.match(String(flat(DEFAULT_SETTINGS)[g][k]), /^#[0-9a-f]{6}$/, `${g}.${k} default colour`);
-	assert.deepEqual(SETTINGS_GROUPS, ['floor', 'wall', 'sun', 'glow', 'key', 'fill', 'shadows']);
+	assert.deepEqual(SETTINGS_GROUPS, ['floor', 'wall', 'window', 'sun', 'glow', 'key', 'fill', 'shadows']);
 	assert.deepEqual(Object.keys(DEFAULT_SETTINGS), [...SETTINGS_GROUPS], 'group order is canonical');
 });
 
@@ -256,6 +257,69 @@ test('sparse round trip: parseSettings(sparseSettings(x)) === x for varied and e
 		assert.deepEqual(back.warnings, []);
 		assert.deepEqual(back.settings, s);
 	}
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// window settings (the admin's "Window wood" group: the frame, sill and muntins' dark-wood texture and tint)
+// ---------------------------------------------------------------------------------------------------------------
+
+test('window: ranges match the floor/wall pattern (tile 0.1..4 m, turn ±180°, offsets ±1 tile); the tint is a colour', () => {
+	assert.deepEqual(SETTING_RANGES.window, {
+		tile: { min: 0.1, max: 4 },
+		rotation: { min: -180, max: 180 },
+		offsetX: { min: -1, max: 1 },
+		offsetY: { min: -1, max: 1 },
+	});
+	assert.match(DEFAULT_SETTINGS.window.color, COLOR_RE);
+});
+
+test('window: parse keeps in-range values, clamps out-of-range numbers with a warning, lower-cases the tint', () => {
+	const r = parseSettings({ window: { tile: 2.5, rotation: 400, offsetX: -5, offsetY: 0.25, color: '#ABCDEF' } });
+	assert.deepEqual(r.settings.window, { tile: 2.5, rotation: 180, offsetX: -1, offsetY: 0.25, color: '#abcdef' });
+	assert.equal(r.warnings.length, 2, JSON.stringify(r.warnings));
+	assert.ok(r.warnings.some((w) => w.includes('settings.window.rotation')), 'rotation clamped');
+	assert.ok(r.warnings.some((w) => w.includes('settings.window.offsetX')), 'offsetX clamped');
+});
+
+test('window: a bad tint or a non-number falls back to the default with a warning; tile 0 clamps to 0.1 (never a zero repeat)', () => {
+	const bad = parseSettings({ window: { color: 'red', tile: 'big' } });
+	assert.deepEqual(bad.settings.window, DEFAULT_SETTINGS.window);
+	assert.equal(bad.warnings.length, 2, JSON.stringify(bad.warnings));
+	assert.ok(bad.warnings.some((w) => w.includes('settings.window.color')));
+	assert.ok(bad.warnings.some((w) => w.includes('settings.window.tile')));
+	const zero = parseSettings({ window: { tile: 0 } });
+	assert.equal(zero.settings.window.tile, 0.1);
+	assert.equal(zero.warnings.length, 1);
+});
+
+test('window: unknown window keys are dropped silently and the window keys keep their canonical order', () => {
+	const r = parseSettings({ window: { bogus: 1, color: '#123456', tile: 1.5 } });
+	assert.deepEqual(r.warnings, []);
+	assert.deepEqual(Object.keys(r.settings.window), Object.keys(DEFAULT_SETTINGS.window));
+	assert.equal(r.settings.window.tile, 1.5);
+});
+
+test('window: sparse storage keeps only the window keys that differ; an untouched window stores nothing', () => {
+	const s = cloneSettings(DEFAULT_SETTINGS);
+	s.window.tile = 2;
+	s.window.color = '#808080';
+	const sparse = sparseSettings(s)!;
+	assert.deepEqual(sparse, { window: { tile: 2, color: '#808080' } });
+	assert.deepEqual(Object.keys(sparse.window!), ['tile', 'color'], 'key order follows the defaults');
+	const same = cloneSettings(DEFAULT_SETTINGS);
+	same.window.rotation = 0;
+	assert.equal(sparseSettings(same), undefined, 'a default window adds nothing to scene.json');
+});
+
+test('window: the sparse window round trip is exact at both range ends, with no warnings; group order is floor, wall, window, sun…', () => {
+	const s = cloneSettings(DEFAULT_SETTINGS);
+	s.window = { tile: 0.1, rotation: -180, offsetX: 1, offsetY: -1, color: '#000000' };
+	const sparse = sparseSettings(s)!;
+	assert.deepEqual(Object.keys(sparse), ['window']);
+	const back = parseSettings({ window: sparse.window });
+	assert.deepEqual(back.warnings, []);
+	assert.deepEqual(back.settings.window, s.window);
+	assert.deepEqual(Object.keys(DEFAULT_SETTINGS), ['floor', 'wall', 'window', 'sun', 'glow', 'key', 'fill', 'shadows']);
 });
 
 // ---------------------------------------------------------------------------------------------------------------

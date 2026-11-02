@@ -9,6 +9,7 @@ import type { Object3D } from 'three';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import type { RoomColors } from '../../data/family';
 import { effectiveColors } from '../../data/effective-colors';
+import { pickSpot } from '../../data/import-preview';
 import { clampObjectScale } from '../../data/object-size';
 import {
 	LIMITS,
@@ -25,6 +26,7 @@ import { COLOR_RE, parseSettings } from '../../data/scene-settings';
 import type { SceneSettings } from '../../data/scene-settings';
 import { createRoomCore } from '../room-core';
 import { catalogEntry, createObjectData, nativeSizeOf } from '../room-objects';
+import { createImportPreview } from './import-preview';
 
 export type TransformMode = 'translate' | 'rotate' | 'scale';
 /**
@@ -57,6 +59,14 @@ export interface Editor {
 	/** Replace all rooms' data (e.g. after "Load latest"). Clears the selection. */
 	setScene(scene: SceneData): void;
 	setRoom(slug: string): void;
+	/**
+	 * Live ghost of a model that is being imported (not scene data: no `edit`, no undo, not in getScene()/Save). `glb` is
+	 * the picked model, `defaultScale` the form's scale; it sits where addObject() would put a new object. Replaces any
+	 * earlier preview; `null` removes it.
+	 */
+	setImportPreview(glb: ArrayBuffer | null, defaultScale: number): void;
+	/** Rebuilds the preview at a new default scale (same size limits as a placed object). No-op without a preview. */
+	setImportPreviewScale(defaultScale: number): void;
 	/** Adds a catalog entry to the current room, selects it and returns its id (null if the type is unknown). */
 	addObject(type: string): string | null;
 	duplicateSelected(): void;
@@ -165,7 +175,13 @@ export function createEditor(options: EditorOptions): Editor | null {
 	// Models that were just added: once loaded, their real size is known and they get fitted into the room.
 	const pendingFit = new Set<string>();
 
-	const emit = (reason: ChangeReason) => options.onChange?.(reason);
+	// The import ghost stands where "Add to room" would put a new object, so it follows every change that can move
+	// that spot (objects added, moved or removed, another room or scene, Bounds toggled); relocate() is a cheap no-op
+	// when the spot is the same. It never raises `edit` itself.
+	const emit = (reason: ChangeReason) => {
+		if (reason === 'edit' || reason === 'scene' || reason === 'room' || reason === 'mode') importPreview.relocate();
+		options.onChange?.(reason);
+	};
 	const roomObjects = () => data.rooms[room].objects;
 	// Objects of a model that is not in the catalog (models.json broken or entry removed) stay in the
 	// data, so Save writes them back unchanged, but they have no 3D view and cannot be selected.
@@ -365,6 +381,21 @@ export function createEditor(options: EditorOptions): Editor | null {
 	canvas.addEventListener('pointerdown', onPointerDown);
 	canvas.addEventListener('pointerup', onPointerUp);
 
+	// --- Import preview -------------------------------------------------------------------------------
+	const nextSpot = (): Vec3 => {
+		const [x, z] = pickSpot(SPOTS, roomObjects().map((o) => o.position));
+		return [x, 0, z];
+	};
+	const importPreview = createImportPreview({
+		scene: core.scene,
+		spot: nextSpot,
+		fit: (holder) => {
+			if (bounds) fitIntoRoom(holder);
+		},
+		fitOn: () => bounds,
+		repaint: () => core.invalidate(),
+	});
+
 	// --- Actions --------------------------------------------------------------------------------------
 	const newId = (type: string) => {
 		const base = type.replace(/[^A-Za-z0-9_-]/g, '-');
@@ -438,14 +469,20 @@ export function createEditor(options: EditorOptions): Editor | null {
 			emit('room');
 		},
 
+		setImportPreview(glb, defaultScale) {
+			if (disposed) return;
+			if (glb) importPreview.show(glb, defaultScale);
+			else importPreview.clear();
+		},
+
+		setImportPreviewScale(defaultScale) {
+			if (!disposed) importPreview.setScale(defaultScale);
+		},
+
 		addObject(type) {
 			const entry = catalogEntry(type);
 			if (!entry || roomObjects().length >= LIMITS.maxObjectsPerRoom) return null;
-			const free = SPOTS.find(([x, z]) =>
-				roomObjects().every((o) => Math.hypot(o.position[0] - x, o.position[2] - z) > 0.6),
-			);
-			const [x, z] = free ?? SPOTS[0];
-			const object = createObjectData(type, newId(type), [x, 0, z]);
+			const object = createObjectData(type, newId(type), nextSpot());
 			insert(object);
 			return object.id;
 		},
@@ -572,6 +609,7 @@ export function createEditor(options: EditorOptions): Editor | null {
 			core.scene.remove(gizmoHelper);
 			gizmo.dispose();
 			clearHighlight();
+			importPreview.clear();
 			core.dispose();
 		},
 	};

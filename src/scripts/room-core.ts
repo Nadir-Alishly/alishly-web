@@ -35,10 +35,18 @@ import { ROOM_DIMS } from '../data/scene';
 import { FLOOR_PLANKS, mulberry32, plankLayout } from '../data/room-floor';
 import { haloRect, polygonBounds, sunPatch } from '../data/room-glow';
 import type { Rect } from '../data/room-glow';
-import { floorMultiplier, OAK_LINEAR, WOOD_EDGE, wallTint } from '../data/room-palette';
-import { OAK_DIFFUSE_URL, OAK_ROUGHNESS_URL, STUCCO_DETAIL_URL, STUCCO_NORMAL_URL } from '../data/room-textures';
-import { boxUvs } from '../data/room-uv';
+import { floorMultiplier, WOOD_EDGE, wallTint } from '../data/room-palette';
+import {
+	OAK_DIFFUSE_URL,
+	OAK_ROUGHNESS_URL,
+	STUCCO_DETAIL_URL,
+	STUCCO_NORMAL_URL,
+	WINDOW_DIFFUSE_URL,
+	WINDOW_ROUGHNESS_URL,
+} from '../data/room-textures';
+import { barUvs, boxUvs } from '../data/room-uv';
 import { leftWallPieces, WINDOW_OPENING, windowFrame } from '../data/room-window';
+import { DARK_WOOD_LINEAR, longAxisOf, WINDOW_UV_TILE, windowMapTransform } from '../data/window-wood';
 import { sunBlockerFor, wallCaps } from '../data/room-sun';
 import { DEFAULT_SETTINGS, SETTING_RANGES, keyDirection, sunDirection } from '../data/scene-settings';
 import type { SceneSettings } from '../data/scene-settings';
@@ -73,16 +81,18 @@ export interface RoomCore {
 	/** Request a repaint. Call after ANY change to the scene: rendering is on demand. */
 	invalidate(): void;
 	/**
-	 * Repaint without re-rendering the shadow maps. For animation steps that only change the look (a highlight,
-	 * a small float); call invalidate() once when the motion has settled so the shadows catch up.
+	 * Repaint without re-rendering the shadow maps. For changes that only affect the look (a highlight, a popup that
+	 * follows an object); anything that moves or reshapes a shadow caster needs invalidate() instead.
 	 */
 	requestFrame(): void;
 	/**
 	 * Runs once per frame, after the camera has been updated and before the render (so it may change the scene
 	 * and call requestFrame()). Return true to get another frame (animation in progress). Pass null to remove.
+	 * `cameraMoved` is true when the camera moved this frame by any means: the controls (drag, wheel, damping) or the
+	 * home ease of setRoom (which writes the camera directly and does not fire the controls' 'change').
 	 * Only one hook; used by the public viewer's interaction layer.
 	 */
-	setFrameHook(hook: ((now: number) => boolean) | null): void;
+	setFrameHook(hook: ((now: number, cameraMoved: boolean) => boolean) | null): void;
 	/** Swap to another room's shell in place: tweens colours, eases the camera home. Does not touch objects. */
 	setRoom(config: RoomConfig): void;
 	/** Show these colours at once (no tween, no camera move): live editing of the current room's walls. */
@@ -136,6 +146,7 @@ const WALL_TILE = 8;
 // Procedural plank floor, the fallback while the oak is not there. Painted around a light neutral so that `colour x map`
 // reads as the room's wood.
 const FLOOR_TEXTURE_SIZE = 1024; // px; one tile covers the whole 6.4 x 6.4 floor top (160 px per world unit)
+const WINDOW_ROUGHNESS = 0.6; // window wood without its roughness map: a satin varnish, a little duller than the floor
 const FLOOR_ROUGHNESS = 0.5; // satin: a broad sheen from the key light and the sun, no mirror image
 const PLANK_LIGHTNESS = 0.9; // average map value (0..1)
 const PLANK_VARIATION = 0.055; // +- tone shift between planks
@@ -428,9 +439,9 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	};
 	const colorKeys = Object.keys(mats) as (keyof RoomColors)[];
 	// Not in `mats` (the colour tween walks every key there): the slab edge is the same dark wood in every room, and
-	// the window wood follows the floor's tint whenever it changes.
+	// the window wood has its own tint (settings.window.color), the same in every room.
 	const floorEdge = new MeshLambertMaterial({ color: WOOD_EDGE });
-	const windowWood = new MeshLambertMaterial();
+	const windowWood = new MeshStandardMaterial({ roughness: WINDOW_ROUGHNESS, metalness: 0 });
 
 	// A `geometry` is already placed in world space (see wallBox); without one the part is a scaled/moved copy of `box`.
 	const part = (material: Material | Material[], min: Vector3, max: Vector3, geometry?: BufferGeometry) => {
@@ -457,6 +468,24 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 		geometry.setAttribute('uv', new Float32BufferAttribute(boxUvs(position.array, normal.array, WALL_TILE), 2));
 		return geometry;
 	};
+	// A window bar is the same, but its uvs keep the grain along the bar (barUvs) and run at WINDOW_UV_TILE, so the
+	// `window` settings scale one texture across frame, sill and muntins alike.
+	const barBox = (min: Vector3, max: Vector3) => {
+		const geometry = new BoxGeometry(max.x - min.x, max.y - min.y, max.z - min.z).translate(
+			(min.x + max.x) / 2,
+			(min.y + max.y) / 2,
+			(min.z + max.z) / 2,
+		);
+		const { position, normal } = geometry.attributes;
+		const uvs = barUvs(position.array, normal.array, WINDOW_UV_TILE, longAxisOf([min.x, min.y, min.z], [max.x, max.y, max.z]));
+		geometry.setAttribute('uv', new Float32BufferAttribute(uvs, 2));
+		return geometry;
+	};
+	const barOf = (material: Material, b: { min: readonly number[]; max: readonly number[] }) => {
+		const min = v(b.min[0], b.min[1], b.min[2]);
+		const max = v(b.max[0], b.max[1], b.max[2]);
+		return part(material, min, max, barBox(min, max));
+	};
 	const wall = (material: Material, min: Vector3, max: Vector3) => part(material, min, max, wallBox(min, max));
 	const wallOf = (material: Material, b: { min: readonly number[]; max: readonly number[] }) =>
 		wall(material, v(b.min[0], b.min[1], b.min[2]), v(b.max[0], b.max[1], b.max[2]));
@@ -478,10 +507,10 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 		mesh.receiveShadow = false;
 	}
 
-	// Window frame, muntins and sill are oak in the floor's tint (windowWood, kept in step with mats.floor). The panes,
+	// Window frame, muntins and sill are dark wood (windowWood: own maps and tint, not the floor's). The panes,
 	// halo, light pool and drop shadow have their own materials too. None of them is in `mats`.
 	const win = windowFrame(ROOM_DIMS);
-	for (const b of [win.sill, ...win.frame, ...win.muntins]) partOf(windowWood, b);
+	for (const b of [win.sill, ...win.frame, ...win.muntins]) barOf(windowWood, b);
 	const { glazing } = win;
 	// Unlit warm-white pane in the opening: a light source, not a view of the sky, and opaque so the page never shows
 	// through. It is slightly larger than the opening and its edges hide inside the wall pieces. It does not cast
@@ -691,19 +720,14 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	// use the hex as it is. Everything that sets or tweens a colour goes through colorOf().
 	let oakFloor = false;
 	let stuccoWalls = false;
-	const oakLinear = new Color().setRGB(...OAK_LINEAR);
+	let windowMapsOn = false;
+	const darkWoodLinear = new Color().setRGB(...DARK_WOOD_LINEAR);
 	const colorOf = (key: keyof RoomColors, hex: string) => {
 		if (key === 'floor') return oakFloor ? new Color().setRGB(...floorMultiplier(hex)) : new Color(hex);
 		return stuccoWalls ? new Color().setRGB(...wallTint(hex)) : new Color(hex);
 	};
-	// Oak: the tint times the oak's mean, so the frame is the floor's wood, not white. Fallback: the floor colour itself.
-	const syncWindowWood = () => {
-		windowWood.color.copy(mats.floor.color);
-		if (oakFloor) windowWood.color.multiply(oakLinear);
-	};
 	const applyColors = (colors: RoomColors) => {
 		for (const key of colorKeys) mats[key].color.copy(colorOf(key, colors[key]));
-		syncWindowWood();
 	};
 	applyColors(initial.colors);
 	let current = initial;
@@ -730,6 +754,18 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 		texture.repeat.setScalar(repeat);
 		texture.offset.set(offsetX + 0.5 * (repeat - 1), offsetY + 0.5 * (repeat - 1));
 	};
+	// Window wood: the tint multiplies the dark-wood map; without the map the bars are the map's mean colour × tint.
+	const applyWindowWood = () => {
+		if (windowMapsOn) {
+			const { repeat, rotation, offsetX, offsetY } = windowMapTransform(settings.window);
+			mapTransform(windowWood.map, repeat, rotation, offsetX, offsetY);
+			mapTransform(windowWood.roughnessMap, repeat, rotation, offsetX, offsetY);
+		}
+		windowWood.color.set(settings.window.color);
+		if (!windowMapsOn) windowWood.color.multiply(darkWoodLinear);
+		windowWood.roughness = windowMapsOn && windowWood.roughnessMap ? 1 : WINDOW_ROUGHNESS;
+	};
+	applyWindowWood();
 	// Everything about the loaded oak/stucco that settings control. Called when settings change AND when late maps arrive.
 	const applyTextureSettings = () => {
 		const { floor, wall } = settings;
@@ -747,6 +783,7 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 			}
 		}
 		for (const material of [mats.leftWall, mats.rightWall]) material.normalScale.setScalar(wall.normalScale);
+		applyWindowWood();
 	};
 	// Cheap writes: uniforms and properties, no rebuild.
 	const applyLiveSettings = () => {
@@ -843,7 +880,7 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	let shadowDirty = true; // the shadow maps are stale; set by anything that moves or changes a caster
 	let disposed = false;
 	let inFrame = false;
-	let frameHook: ((now: number) => boolean) | null = null;
+	let frameHook: ((now: number, cameraMoved: boolean) => boolean) | null = null;
 	let held = true; // the first render waits for the textures (see below)
 	let colorTween: { start: number; from: Color[]; to: Color[] } | null = null;
 	let cameraTween: { start: number; from: Spherical; zoom: number } | null = null;
@@ -868,6 +905,7 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 	const frame = (now: number) => {
 		raf = 0;
 		let tweening = false;
+		let cameraEased = false; // the home ease moved the camera this frame (it bypasses the controls' 'change')
 
 		runRebuilds(); // settings changes that need new geometry/textures/shadow cameras, before the shadow maps are drawn
 
@@ -877,7 +915,6 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 			colorKeys.forEach((key, i) => {
 				mats[key].color.lerpColors(colors.from[i], colors.to[i], ease(t));
 			});
-			syncWindowWood();
 			if (t >= 1) colorTween = null;
 			else tweening = true;
 			dirty = true;
@@ -893,6 +930,7 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 			camera.position.setFromSpherical(s).add(TARGET);
 			camera.zoom = MathUtils.lerp(cameraTween.zoom, 1, t);
 			camera.updateProjectionMatrix();
+			cameraEased = true;
 			if (t >= 1) cameraTween = null;
 			else tweening = true;
 			dirty = true;
@@ -905,7 +943,7 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 		if (frameHook) {
 			inFrame = true;
 			try {
-				if (frameHook(now)) tweening = true;
+				if (frameHook(now, moved || cameraEased)) tweening = true;
 			} finally {
 				inFrame = false;
 			}
@@ -1038,6 +1076,20 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 		applyTextureSettings(); // tile, rotation, offset on both maps; normal scale
 		recolor();
 	};
+	const loadWindow = async () => {
+		const [diffuse, rough] = await Promise.all([loadMap(WINDOW_DIFFUSE_URL, true), loadMap(WINDOW_ROUGHNESS_URL, false)]);
+		if (disposed || !diffuse) {
+			diffuse?.dispose();
+			rough?.dispose();
+			return;
+		}
+		windowWood.map = diffuse;
+		windowWood.roughnessMap = rough;
+		windowWood.needsUpdate = true;
+		windowMapsOn = true;
+		applyTextureSettings(); // tile, rotation, offset, tint
+		invalidate();
+	};
 	const release = () => {
 		clearTimeout(waitTimer);
 		if (!held || disposed) return;
@@ -1049,7 +1101,7 @@ export function createRoomCore(canvas: HTMLCanvasElement, initial: RoomConfig): 
 		warnOnce(`The room textures took over ${TEXTURE_WAIT_MS} ms; drawing the plain materials first.`);
 		release();
 	}, TEXTURE_WAIT_MS);
-	void Promise.allSettled([loadFloor(), loadWalls()]).then((results) => {
+	void Promise.allSettled([loadFloor(), loadWalls(), loadWindow()]).then((results) => {
 		for (const result of results) {
 			if (result.status === 'rejected') warnOnce('Could not apply the room textures.', result.reason);
 		}
